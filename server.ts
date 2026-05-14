@@ -8,7 +8,7 @@ import dotenv from "dotenv";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "./src/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 
 dotenv.config();
 
@@ -201,7 +201,7 @@ app.post('/api/logs/sync', async (req, res) => {
             spreadsheetId,
             range: 'Sheet1!A1',
             valueInputOption: 'RAW',
-            requestBody: { values: [['Date', 'Food Name', 'Calories']] },
+            requestBody: { values: [['Date', 'Food Name', 'Calories', 'Protein (g)', 'Carbs (g)', 'Fat (g)']] },
           });
         }
         (req.session as any).spreadsheetId = spreadsheetId;
@@ -215,6 +215,9 @@ app.post('/api/logs/sync', async (req, res) => {
         userId,
         foodName: log.food_name,
         calories: log.calories,
+        protein: log.protein,
+        carbs: log.carbs,
+        fat: log.fat,
         createdAt: new Date(log.timestamp),
       }).returning();
 
@@ -225,7 +228,7 @@ app.post('/api/logs/sync', async (req, res) => {
           range: 'Sheet1!A1',
           valueInputOption: 'RAW',
           requestBody: {
-            values: [[log.timestamp, log.food_name, log.calories]],
+            values: [[log.timestamp, log.food_name, log.calories, log.protein, log.carbs, log.fat]],
           },
         });
       }
@@ -267,8 +270,7 @@ app.delete('/api/logs/:id', async (req, res) => {
     if (isNaN(logId)) return res.status(400).json({ error: "Invalid ID" });
 
     const result = await db.delete(schema.logs)
-      .where(eq(schema.logs.id, logId))
-      .where(eq(schema.logs.userId, userId))
+      .where(and(eq(schema.logs.id, logId), eq(schema.logs.userId, userId)))
       .returning();
 
     if (result.length === 0) return res.status(404).json({ error: "Log not found or unauthorized" });
@@ -292,8 +294,7 @@ app.put('/api/logs/:id', async (req, res) => {
 
     const result = await db.update(schema.logs)
       .set({ calories, foodName })
-      .where(eq(schema.logs.id, logId))
-      .where(eq(schema.logs.userId, userId))
+      .where(and(eq(schema.logs.id, logId), eq(schema.logs.userId, userId)))
       .returning();
 
     if (result.length === 0) return res.status(404).json({ error: "Log not found or unauthorized" });
@@ -309,15 +310,83 @@ app.post('/api/profile', async (req, res) => {
   const userId = (req.session as any).userId;
   if (!userId) return res.status(401).json({ error: "Not authenticated" });
 
-  const { age, weight, height } = req.body;
+  const { age, weight, height, gender, activityLevel, targetWeight, targetDate, country } = req.body;
   try {
     await db.update(schema.users)
-      .set({ age, weight, height })
+      .set({ age, weight, height, gender, activityLevel, targetWeight, targetDate, country })
       .where(eq(schema.users.id, userId));
     res.json({ success: true });
   } catch (error) {
     console.error("Update Profile Error:", error);
     res.status(500).json({ error: "Failed to update profile" });
+  }
+});
+
+// Workouts API
+app.get('/api/workouts', async (req, res) => {
+  const userId = (req.session as any).userId;
+  if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+  try {
+    const userWorkouts = await db.select().from(schema.workouts).where(eq(schema.workouts.userId, userId));
+    res.json(userWorkouts);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch workouts" });
+  }
+});
+
+app.post('/api/workouts', async (req, res) => {
+  const userId = (req.session as any).userId;
+  if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+  const { type, caloriesBurned, createdAt } = req.body;
+  try {
+    const [newWorkout] = await db.insert(schema.workouts).values({
+      userId,
+      type,
+      caloriesBurned,
+      createdAt: createdAt ? new Date(createdAt) : new Date(),
+    }).returning();
+    res.json(newWorkout);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to add workout" });
+  }
+});
+
+app.delete('/api/workouts/:id', async (req, res) => {
+  const userId = (req.session as any).userId;
+  if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+  try {
+    await db.delete(schema.workouts)
+      .where(and(eq(schema.workouts.id, parseInt(req.params.id)), eq(schema.workouts.userId, userId)));
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to delete workout" });
+  }
+});
+
+app.post('/api/workouts/sync', async (req, res) => {
+  const userId = (req.session as any).userId;
+  if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+  const { workouts } = req.body;
+  if (!Array.isArray(workouts)) return res.status(400).json({ error: "Invalid data" });
+
+  try {
+    const results = [];
+    for (const w of workouts) {
+      const [newW] = await db.insert(schema.workouts).values({
+        userId,
+        type: w.type,
+        caloriesBurned: w.calories_burned,
+        createdAt: new Date(w.timestamp),
+      }).returning();
+      results.push({ localId: w.id, serverId: newW.id });
+    }
+    res.json({ success: true, synced: results });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
   }
 });
 app.post('/api/sync/sheets', async (req, res) => {
@@ -351,13 +420,12 @@ app.post('/api/sync/sheets', async (req, res) => {
         });
         spreadsheetId = spreadsheet.data.spreadsheetId;
         
-        // Initialize header
         await sheets.spreadsheets.values.append({
           spreadsheetId,
           range: 'Sheet1!A1',
           valueInputOption: 'RAW',
           requestBody: {
-            values: [['Date', 'Food Name', 'Calories']],
+            values: [['Date', 'Food Name', 'Calories', 'Protein (g)', 'Carbs (g)', 'Fat (g)']],
           },
         });
       }
@@ -370,7 +438,7 @@ app.post('/api/sync/sheets', async (req, res) => {
       range: 'Sheet1!A1',
       valueInputOption: 'RAW',
       requestBody: {
-        values: [[date || new Date().toISOString(), foodName, calories]],
+        values: [[date || new Date().toISOString(), foodName, calories, req.body.protein, req.body.carbs, req.body.fat]],
       },
     });
 
@@ -381,6 +449,9 @@ app.post('/api/sync/sheets', async (req, res) => {
         userId,
         foodName,
         calories,
+        protein: req.body.protein,
+        carbs: req.body.carbs,
+        fat: req.body.fat,
         createdAt: date ? new Date(date) : new Date(),
       });
     }

@@ -5,14 +5,28 @@ export interface UserProfile {
   height: number; // cm
   gender: 'male' | 'female';
   activityLevel: number; // 1.2 to 1.9
+  targetWeight?: number;
+  targetDate?: string;
+  country?: string;
 }
 
 export interface MealLog {
   id: string;
   food_name: string;
   calories: number;
+  protein?: number;
+  carbs?: number;
+  fat?: number;
   timestamp: string;
   image?: string;
+  synced?: boolean;
+}
+
+export interface WorkoutLog {
+  id: string;
+  type: string;
+  calories_burned: number;
+  timestamp: string;
   synced?: boolean;
 }
 
