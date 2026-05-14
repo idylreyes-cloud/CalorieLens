@@ -1,6 +1,6 @@
 {
   "name": "CalorieLens",
-  "description": "Intelligent food scanning and calorie tracking with Google Sheets synchronization.",
+  "description": "Intelligent food scanning and calorie tracking with local-first storage and multi-profile support.",
   "requestFramePermissions": [
     "camera"
   ],

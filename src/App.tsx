@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { GoogleGenAI, Type } from '@google/genai';
 import { 
   Camera, 
   Settings, 
@@ -21,13 +22,12 @@ import {
   ArrowRight,
   TrendingDown,
   Calendar,
-  Cloud,
   Sparkles,
   MapPin,
   Target,
-  Download
+  Download,
+  Users
 } from 'lucide-react';
-import { GoogleGenAI, Type } from "@google/genai";
 import { UserProfile, MealLog, WorkoutLog, ACTIVITY_LEVELS } from './types';
 
 // --- Utils ---
@@ -109,37 +109,17 @@ const getCalorieGoalInfo = (profile: UserProfile): { dailyTarget: number, advice
   return { dailyTarget: Math.max(dailyTarget, minCalories), advice, isUnreachable, suggestions };
 };
 
-const getMealRecommendation = async (profile: UserProfile, targetMacros: { protein: number, carbs: number, fat: number, calories: number }, logs: MealLog[]) => {
-  const currentHour = new Date().getHours();
-  let mealType = "Snack";
-  if (currentHour >= 5 && currentHour < 11) mealType = "Breakfast";
-  else if (currentHour >= 11 && currentHour < 16) mealType = "Lunch";
-  else if (currentHour >= 16 && currentHour < 22) mealType = "Dinner";
+// --- AI ---
+const getAI = () => new GoogleGenAI({ apiKey: (process as any).env.GEMINI_API_KEY });
 
-  const dailyEaten = logs
-    .filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString())
-    .reduce((sums, log) => ({
-      protein: sums.protein + (log.protein || 0),
-      carbs: sums.carbs + (log.carbs || 0),
-      fat: sums.fat + (log.fat || 0),
-      calories: sums.calories + log.calories
-    }), { protein: 0, carbs: 0, fat: 0, calories: 0 });
-
-  const remaining = {
-    protein: Math.max(0, targetMacros.protein - dailyEaten.protein),
-    carbs: Math.max(0, targetMacros.carbs - dailyEaten.carbs),
-    fat: Math.max(0, targetMacros.fat - dailyEaten.fat),
-    calories: Math.max(0, targetMacros.calories - dailyEaten.calories)
-  };
-
+const getMealRecommendation = async (profile: UserProfile, targetMacros: { protein: number, carbs: number, fat: number, calories: number }, eaten: { protein: number, carbs: number, fat: number, calories: number }) => {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const prompt = `User is in ${profile.country || 'USA'}. It is currently ${mealType} time. 
+    const ai = getAI();
+    const prompt = `User is in ${profile.country || 'USA'}. 
     Target daily macros: Protein ${targetMacros.protein}g, Carbs ${targetMacros.carbs}g, Fat ${targetMacros.fat}g, Calories ${targetMacros.calories}kcal.
-    Already eaten today: Protein ${dailyEaten.protein}g, Carbs ${dailyEaten.carbs}g, Fat ${dailyEaten.fat}g, Calories ${dailyEaten.calories}kcal.
-    Remaining budget: Protein ${remaining.protein}g, Carbs ${remaining.carbs}g, Fat ${remaining.fat}g, Calories ${remaining.calories}kcal.
-    Suggest a specific, popular dish from ${profile.country || 'USA'} for ${mealType} that helps balance these remaining macros.
-    Provide the dish name and estimated macros for a typical portion that fits the remaining budget.`;
+    Already eaten today: Protein ${eaten.protein}g, Carbs ${eaten.carbs}g, Fat ${eaten.fat}g, Calories ${eaten.calories}kcal.
+    Suggest a specific, popular dish from ${profile.country || 'USA'} that helps balance these remaining macros.
+    Provide the dish name and estimated macros for a typical portion.`;
 
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
@@ -160,8 +140,7 @@ const getMealRecommendation = async (profile: UserProfile, targetMacros: { prote
         }
       }
     });
-
-    return JSON.parse(response.text);
+    return JSON.parse(response.text || '{}');
   } catch (e) {
     console.error("Meal Recommendation Error:", e);
     return null;
@@ -170,7 +149,7 @@ const getMealRecommendation = async (profile: UserProfile, targetMacros: { prote
 
 const analyzeTextMeal = async (text: string) => {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const ai = getAI();
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: [{ parts: [{ text: `Identify nutritional info for: "${text}". Provide estimated calories, protein (g), carbs (g), and fat (g).` }] }],
@@ -189,7 +168,7 @@ const analyzeTextMeal = async (text: string) => {
         }
       }
     });
-    return JSON.parse(response.text);
+    return JSON.parse(response.text || '{}');
   } catch (e) {
     console.error("Text Meal Analysis Error:", e);
     return null;
@@ -237,7 +216,7 @@ const ProgressBar = ({ current, total, advice, pcf }: { current: number, total: 
   );
 };
 
-const Header = ({ onProfile }: { onProfile: () => void }) => (
+const Header = ({ onProfile, currentProfile }: { onProfile: () => void, currentProfile: UserProfile }) => (
   <header className="flex justify-between items-center py-6 border-b border-zinc-100 bg-white/80 backdrop-blur-md sticky top-0 z-30 px-6">
     <div className="flex items-center gap-2">
       <div className="w-8 h-8 bg-zinc-900 rounded-lg flex items-center justify-center text-white">
@@ -245,26 +224,46 @@ const Header = ({ onProfile }: { onProfile: () => void }) => (
       </div>
       <span className="font-black tracking-tighter text-2xl uppercase italic">CalorieLens</span>
     </div>
-    <button onClick={onProfile} className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center hover:bg-zinc-200 transition-colors">
-      <User size={20} />
+    <button onClick={onProfile} className="flex items-center gap-2 group">
+      <div className="text-right hidden sm:block">
+        <div className="text-[9px] font-black uppercase text-zinc-400 group-hover:text-zinc-900 transition-colors">Active Profile</div>
+        <div className="text-xs font-bold">{currentProfile.name || 'Set Name'}</div>
+      </div>
+      <div 
+        className="w-10 h-10 rounded-full flex items-center justify-center border-2 border-zinc-100 group-hover:border-zinc-900 transition-all overflow-hidden"
+        style={{ backgroundColor: currentProfile.avatarColor || '#f4f4f5' }}
+      >
+        <User size={20} className={currentProfile.avatarColor ? 'text-white' : 'text-zinc-400'} />
+      </div>
     </button>
   </header>
 );
 
 export default function App() {
   const [view, setView] = useState<'dashboard' | 'camera' | 'profile' | 'history'>('dashboard');
-  const [profile, setProfile] = useState<UserProfile>(() => {
-    const saved = localStorage.getItem('cl_profile');
-    return saved ? JSON.parse(saved) : {
-      name: '',
+  
+  const [profiles, setProfiles] = useState<UserProfile[]>(() => {
+    const saved = localStorage.getItem('cl_profiles');
+    if (saved) return JSON.parse(saved);
+    const defaultProfile: UserProfile = {
+      id: 'p1',
+      name: 'Primary',
       age: 28,
       weight: 70,
       height: 175,
       gender: 'male',
       activityLevel: 1.375,
-      country: 'USA'
+      country: 'USA',
+      avatarColor: '#18181b'
     };
+    return [defaultProfile];
   });
+
+  const [activeProfileId, setActiveProfileId] = useState<string>(() => {
+    return localStorage.getItem('cl_active_profile_id') || 'p1';
+  });
+
+  const profile = profiles.find(p => p.id === activeProfileId) || profiles[0];
   
   const [logs, setLogs] = useState<MealLog[]>(() => {
     const saved = localStorage.getItem('cl_logs');
@@ -280,14 +279,14 @@ export default function App() {
   const [mealTextInput, setMealTextInput] = useState('');
   const [isAnalyzingText, setIsAnalyzingText] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [hasSheetsAccess, setHasSheetsAccess] = useState(false);
-  const googleBtnRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    localStorage.setItem('cl_profile', JSON.stringify(profile));
-  }, [profile]);
+    localStorage.setItem('cl_profiles', JSON.stringify(profiles));
+  }, [profiles]);
+
+  useEffect(() => {
+    localStorage.setItem('cl_active_profile_id', activeProfileId);
+  }, [activeProfileId]);
 
   useEffect(() => {
     localStorage.setItem('cl_logs', JSON.stringify(logs));
@@ -297,265 +296,38 @@ export default function App() {
     localStorage.setItem('cl_workouts', JSON.stringify(workouts));
   }, [workouts]);
 
-  useEffect(() => {
-    checkAuth();
-    initGoogleSignIn();
-  }, []);
-
-  const initGoogleSignIn = () => {
-    const google = (window as any).google;
-    if (google) {
-      google.accounts.id.initialize({
-        client_id: (import.meta as any).env.VITE_GOOGLE_CLIENT_ID || '', // We'll need to use VITE_ prefix for client side
-        callback: handleGoogleResponse,
-      });
-      if (googleBtnRef.current) {
-        google.accounts.id.renderButton(googleBtnRef.current, {
-          theme: 'outline',
-          size: 'large',
-          shape: 'pill'
-        });
-      }
-    }
-  };
-
-  const handleGoogleResponse = async (response: any) => {
-    try {
-      const res = await fetch('/api/auth/google', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ credential: response.credential })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setIsAuthenticated(true);
-        fetchData();
-      }
-    } catch (e) {
-      console.error("Login Error:", e);
-    }
-  };
-
-  const checkAuth = async () => {
-    try {
-      const res = await fetch('/api/auth/status');
-      const data = await res.json();
-      setIsAuthenticated(data.isAuthenticated);
-      setHasSheetsAccess(data.hasSheetsAccess);
-      if (data.isAuthenticated) fetchData();
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const fetchData = async () => {
-    try {
-      const logsRes = await fetch('/api/logs');
-      const logsData = await logsRes.json();
-      if (Array.isArray(logsData)) {
-        const cloudLogs = logsData.map((l: any) => ({
-          id: String(l.id),
-          food_name: l.foodName,
-          calories: l.calories,
-          protein: l.protein,
-          carbs: l.carbs,
-          fat: l.fat,
-          timestamp: l.createdAt,
-          image: l.imageUrl,
-          synced: true
-        }));
-        
-        setLogs(prev => {
-          const unsynced = prev.filter(l => !l.synced);
-          return [...unsynced, ...cloudLogs];
-        });
-      }
-
-      const workoutsRes = await fetch('/api/workouts');
-      const workoutsData = await workoutsRes.json();
-      if (Array.isArray(workoutsData)) {
-        const cloudWorkouts = workoutsData.map((w: any) => ({
-          id: String(w.id),
-          type: w.type,
-          calories_burned: w.caloriesBurned,
-          timestamp: w.createdAt,
-          synced: true
-        }));
-
-        setWorkouts(prev => {
-          const unsynced = prev.filter(w => !w.synced);
-          return [...unsynced, ...cloudWorkouts];
-        });
-      }
-      
-      setTimeout(syncUnsyncedLogs, 1000);
-      setTimeout(syncUnsyncedWorkouts, 1000);
-    } catch (e) {
-      console.error("Fetch Data Error:", e);
-    }
-  };
-
-  const logout = async () => {
-    try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-      setIsAuthenticated(false);
-      setHasSheetsAccess(false);
-      setLogs([]);
-      setView('dashboard');
-      // Re-init Google Sign-In button if needed
-      setTimeout(initGoogleSignIn, 100);
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const deleteLog = async (id: string) => {
-    // If it's a serial ID (string containing only digits), it might be from the server
-    const isServerId = /^\d+$/.test(id);
-    
-    if (isAuthenticated && isServerId) {
-      try {
-        await fetch(`/api/logs/${id}`, { method: 'DELETE' });
-      } catch (e) {
-        console.error("Delete Error:", e);
-      }
-    }
+  const deleteLog = (id: string) => {
     setLogs(prev => prev.filter(l => l.id !== id));
   };
 
-  const updateLog = async (id: string, newCalories: number) => {
+  const updateLog = (id: string, newCalories: number) => {
     if (isNaN(newCalories)) return;
-    const isServerId = /^\d+$/.test(id);
-    
-    if (isAuthenticated && isServerId) {
-      try {
-        await fetch(`/api/logs/${id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ calories: newCalories })
-        });
-      } catch (e) {
-        console.error("Update Error:", e);
-      }
-    }
     setLogs(prev => prev.map(l => l.id === id ? { ...l, calories: newCalories } : l));
   };
 
-  const syncToSheets = async (log: MealLog) => {
-    if (!isAuthenticated) return;
-    setIsSyncing(true);
-    try {
-      const res = await fetch('/api/logs/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ logs: [log] })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setLogs(prev => prev.map(l => l.id === log.id ? { ...l, synced: true } : l));
-      }
-    } catch (e) {
-      console.error("Sync Error:", e);
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
-  const syncUnsyncedLogs = async () => {
-    const unsynced = logs.filter(l => !l.synced);
-    if (unsynced.length === 0 || !isAuthenticated) return;
-
-    setIsSyncing(true);
-    try {
-      const res = await fetch('/api/logs/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ logs: unsynced })
-      });
-      const data = await res.json();
-      if (data.success) {
-        const syncedIds = new Set(data.synced.map((s: any) => s.localId));
-        setLogs(prev => prev.map(l => syncedIds.has(l.id) ? { ...l, synced: true } : l));
-      }
-    } catch (e) {
-      console.error("Batch Sync Error:", e);
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
-  const syncUnsyncedWorkouts = async () => {
-    const unsynced = workouts.filter(w => !w.synced);
-    if (unsynced.length === 0 || !isAuthenticated) return;
-
-    setIsSyncing(true);
-    try {
-      const res = await fetch('/api/workouts/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workouts: unsynced })
-      });
-      const data = await res.json();
-      if (data.success) {
-        const syncedIds = new Set(data.synced.map((s: any) => s.localId));
-        setWorkouts(prev => prev.map(w => syncedIds.has(w.id) ? { ...w, synced: true } : w));
-      }
-    } catch (e) {
-      console.error("Workout Sync Error:", e);
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
-  const addWorkout = async (type: string, calories: number) => {
+  const addWorkout = (type: string, calories: number) => {
     const newWorkout: WorkoutLog = {
       id: Date.now().toString(),
+      profileId: activeProfileId,
       type,
       calories_burned: calories,
       timestamp: new Date().toISOString(),
-      synced: false
     };
-
     setWorkouts([newWorkout, ...workouts]);
-
-    if (isAuthenticated) {
-      try {
-        const res = await fetch('/api/workouts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type,
-            caloriesBurned: calories,
-            createdAt: newWorkout.timestamp
-          })
-        });
-        const data = await res.json();
-        if (data.id) {
-          setWorkouts(prev => prev.map(w => w.id === newWorkout.id ? { ...w, id: String(data.id), synced: true } : w));
-        }
-      } catch (e) {
-        console.error("Add Workout Error:", e);
-      }
-    }
   };
 
-  const removeWorkoutLog = async (id: string) => {
-    const isServerId = /^\d+$/.test(id);
-    if (isAuthenticated && isServerId) {
-      try {
-        await fetch(`/api/workouts/${id}`, { method: 'DELETE' });
-      } catch (e) {
-        console.error("Delete Workout Error:", e);
-      }
-    }
+  const removeWorkoutLog = (id: string) => {
     setWorkouts(prev => prev.filter(w => w.id !== id));
   };
 
-  const dailyEaten = logs
+  const activeLogs = logs.filter(l => l.profileId === activeProfileId);
+  const activeWorkouts = workouts.filter(w => w.profileId === activeProfileId);
+
+  const dailyEaten = activeLogs
     .filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString())
     .reduce((sum, log) => sum + log.calories, 0);
 
-  const dailyBurned = workouts
+  const dailyBurned = activeWorkouts
     .filter(w => new Date(w.timestamp).toDateString() === new Date().toDateString())
     .reduce((sum, w) => sum + w.calories_burned, 0);
 
@@ -575,20 +347,28 @@ export default function App() {
 
   useEffect(() => {
     const fetchRec = async () => {
-      const dailyLogs = logs.filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString());
-      if (dailyLogs.length === 0 || !profile.targetWeight) {
+      const todayLogs = activeLogs.filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString());
+      if (todayLogs.length === 0 || !profile.targetWeight) {
         setRecommendation(null);
         return;
       }
       setIsRefreshingRec(true);
-      const rec = await getMealRecommendation(profile, { ...pcfBudget, calories: calorieBudget }, logs);
+      
+      const eaten = todayLogs.reduce((sums, log) => ({
+        protein: sums.protein + (log.protein || 0),
+        carbs: sums.carbs + (log.carbs || 0),
+        fat: sums.fat + (log.fat || 0),
+        calories: sums.calories + log.calories
+      }), { protein: 0, carbs: 0, fat: 0, calories: 0 });
+
+      const rec = await getMealRecommendation(profile, { ...pcfBudget, calories: calorieBudget }, eaten);
       setRecommendation(rec);
       setIsRefreshingRec(false);
     };
     if (view === 'dashboard') {
       fetchRec();
     }
-  }, [view, calorieBudget, logs.length, profile.country, isAuthenticated]);
+  }, [view, calorieBudget, activeLogs.length, profile.country]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -613,16 +393,15 @@ export default function App() {
     if (result) {
       const newLog: MealLog = {
         id: Math.random().toString(36).substr(2, 9),
+        profileId: activeProfileId,
         food_name: result.food_name,
         calories: result.calories,
         protein: result.protein,
         carbs: result.carbs,
         fat: result.fat,
-        timestamp: new Date().toISOString(),
-        synced: false
+        timestamp: new Date().toISOString()
       };
       setLogs([newLog, ...logs]);
-      syncToSheets(newLog);
       setMealTextInput('');
     }
   };
@@ -638,17 +417,17 @@ export default function App() {
             exit={{ opacity: 0 }}
             className="pb-24"
           >
-            <Header onProfile={() => setView('profile')} />
+            <Header onProfile={() => setView('profile')} currentProfile={profile} />
             
             <main className="p-6 md:p-12 max-w-2xl mx-auto space-y-12">
               {/* Progress */}
               <section className="bg-zinc-50 border border-zinc-100 p-8 rounded-[2rem] shadow-sm relative overflow-hidden">
                 <div className="absolute top-0 right-0 p-6 opacity-5 rotate-12">
                    <TrendingDown size={140} />
-                </div>
+                 </div>
                 <div className="text-[10px] uppercase font-bold tracking-[0.2em] text-zinc-400 mb-6 flex items-center gap-2">
                     <div className="w-1.5 h-1.5 bg-lime-500 rounded-full"></div>
-                    {isAuthenticated ? 'Cloud Sync Active' : 'Guest Mode (Local Storage)'}
+                    Offline Storage Mode (Multi-Profile)
                 </div>
                 <ProgressBar current={dailyCalories} total={calorieBudget} advice={goalInfo.advice} pcf={pcfBudget} />
                 
@@ -660,7 +439,7 @@ export default function App() {
                     <p className="text-[10px] text-zinc-500 font-medium px-4 leading-relaxed">We need a target weight to calculate the perfect macro split for your recommendations.</p>
                     <button onClick={() => setView('profile')} className="mt-4 text-[10px] font-black uppercase tracking-widest text-zinc-600 hover:text-zinc-900">Set Target Weight</button>
                   </div>
-                ) : logs.filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString()).length === 0 ? (
+                ) : activeLogs.filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString()).length === 0 ? (
                   <div className="mt-8 p-6 bg-zinc-50 border border-zinc-100 rounded-3xl text-center">
                     <History size={24} className="mx-auto mb-3 text-zinc-300" />
                     <h4 className="text-[10px] font-black uppercase tracking-widest text-zinc-900 mb-1">No Data for Today</h4>
@@ -702,7 +481,14 @@ export default function App() {
                         disabled={isRefreshingRec}
                         onClick={async () => {
                           setIsRefreshingRec(true);
-                          const rec = await getMealRecommendation(profile, { ...pcfBudget, calories: calorieBudget }, logs);
+                          const todayLogs = activeLogs.filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString());
+                          const eatenData = todayLogs.reduce((sums, log) => ({
+                            protein: sums.protein + (log.protein || 0),
+                            carbs: sums.carbs + (log.carbs || 0),
+                            fat: sums.fat + (log.fat || 0),
+                            calories: sums.calories + log.calories
+                          }), { protein: 0, carbs: 0, fat: 0, calories: 0 });
+                          const rec = await getMealRecommendation(profile, { ...pcfBudget, calories: calorieBudget }, eatenData);
                           setRecommendation(rec);
                           setIsRefreshingRec(false);
                         }}
@@ -724,14 +510,14 @@ export default function App() {
                     <h3 className="text-[10px] font-black uppercase tracking-widest text-zinc-400">Survival Checklist</h3>
                     <div className="grid grid-cols-1 gap-2">
                        {goalInfo.suggestions.map((s, i) => {
-                         const isDone = workouts.some(w => 
+                         const isDone = activeWorkouts.some(w => 
                            new Date(w.timestamp).toDateString() === new Date().toDateString() && 
                            w.type === s.name
                          );
                          return (
                            <button 
                              key={i}
-                             onClick={() => isDone ? removeWorkoutLog(workouts.find(w => w.type === s.name && new Date(w.timestamp).toDateString() === new Date().toDateString())!.id) : addWorkout(s.name, s.calories)}
+                             onClick={() => isDone ? removeWorkoutLog(activeWorkouts.find(w => w.type === s.name && new Date(w.timestamp).toDateString() === new Date().toDateString())!.id) : addWorkout(s.name, s.calories)}
                              className={`flex items-center justify-between p-4 rounded-2xl border transition-all ${isDone ? 'bg-lime-50 border-lime-200 text-lime-900' : 'bg-white border-zinc-100 text-zinc-600 hover:border-zinc-300'}`}
                            >
                              <div className="flex items-center gap-3 text-xs font-bold">
@@ -818,15 +604,6 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Login Invitation for Guests */}
-              {!isAuthenticated && (
-                <div className="p-8 border-2 border-zinc-900 rounded-[2rem] flex flex-col items-center text-center gap-4">
-                  <div className="text-sm font-bold tracking-tight">Save your data to the cloud</div>
-                  <p className="text-[11px] text-zinc-400 leading-relaxed max-w-[200px]">Sign in to sync your meal logs with Google Sheets and access them anywhere.</p>
-                  <div ref={googleBtnRef}></div>
-                </div>
-              )}
-
               {/* Recent Logs */}
               <section>
                 <div className="flex justify-between items-center mb-6">
@@ -839,10 +616,10 @@ export default function App() {
                   </button>
                 </div>
                 <div className="space-y-3">
-                  {logs.filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString()).length === 0 ? (
+                  {activeLogs.filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString()).length === 0 ? (
                     <div className="py-12 text-center text-zinc-400 italic text-sm">No meals logged yet today. Time for a snack?</div>
                   ) : (
-                    logs
+                    activeLogs
                       .filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString())
                       .slice(0, 5)
                       .map(log => (
@@ -856,26 +633,6 @@ export default function App() {
                   )}
                 </div>
               </section>
-
-              {/* Sync Alert */}
-              {isAuthenticated && !hasSheetsAccess && (
-                <div className="bg-blue-50 border border-blue-100 p-6 rounded-3xl flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-bold text-blue-900">Sheets Sync Off</div>
-                    <div className="text-xs text-blue-700">Backup your logs to Google Sheets.</div>
-                  </div>
-                  <button 
-                    onClick={async () => {
-                      const res = await fetch('/api/auth/url');
-                      const { url } = await res.json();
-                      window.open(url, 'oauth', 'width=600,height=700');
-                    }}
-                    className="bg-blue-600 text-white px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-blue-700 transition-colors"
-                  >
-                    Connect
-                  </button>
-                </div>
-              )}
             </main>
           </motion.div>
         )}
@@ -883,11 +640,10 @@ export default function App() {
         {view === 'camera' && (
           <CameraView 
             initialImage={initialImage}
+            activeProfileId={activeProfileId}
             onClose={() => setView('dashboard')} 
             onLog={(log) => {
-              const newLog = { ...log, synced: false };
-              setLogs([newLog, ...logs]);
-              syncToSheets(newLog);
+              setLogs([log, ...logs]);
               setView('dashboard');
             }} 
           />
@@ -896,17 +652,18 @@ export default function App() {
         {view === 'profile' && (
           <ProfileView 
             profile={profile} 
-            onChange={setProfile} 
+            profiles={profiles}
+            activeProfileId={activeProfileId}
+            onSetActiveProfile={setActiveProfileId}
+            onUpdateProfiles={setProfiles}
+            onChange={(p) => setProfiles(prev => prev.map(old => old.id === p.id ? p : old))} 
             onClose={() => setView('dashboard')} 
-            onSyncAuth={checkAuth}
-            isAuthenticated={isAuthenticated}
-            onLogout={logout}
           />
         )}
 
         {view === 'history' && (
           <HistoryView 
-             logs={logs} 
+             logs={activeLogs} 
              onClose={() => setView('dashboard')} 
              onDelete={deleteLog}
              onEdit={updateLog}
@@ -919,7 +676,7 @@ export default function App() {
 
 // --- Sub-Views ---
 
-const CameraView = ({ onClose, onLog, initialImage }: { onClose: () => void, onLog: (l: MealLog) => void, initialImage?: string | null }) => {
+const CameraView = ({ onClose, onLog, initialImage, activeProfileId }: { onClose: () => void, onLog: (l: MealLog) => void, initialImage?: string | null, activeProfileId: string }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -964,17 +721,15 @@ const CameraView = ({ onClose, onLog, initialImage }: { onClose: () => void, onL
   const analyzeImage = async (base64: string) => {
     setIsLoading(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const ai = getAI();
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: [
-          {
-            parts: [
-              { inlineData: { mimeType: "image/jpeg", data: base64.split(',')[1] } },
-              { text: "Identify this food and provide estimated calories, protein (g), carbs (g), and fat (g)." }
-            ]
-          }
-        ],
+        contents: [{
+          parts: [
+            { inlineData: { mimeType: "image/jpeg", data: base64.split(',')[1] } },
+            { text: "Identify this food and provide estimated calories, protein (g), carbs (g), and fat (g)." }
+          ]
+        }],
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -990,12 +745,10 @@ const CameraView = ({ onClose, onLog, initialImage }: { onClose: () => void, onL
           }
         }
       });
-      
-      const text = response.text;
-      const data = JSON.parse(text);
+      const data = JSON.parse(response.text || '{}');
       setAnalysis(data);
     } catch (e) {
-      console.error(e);
+      console.error("AI Analysis Error:", e);
     } finally {
       setIsLoading(false);
     }
@@ -1073,6 +826,7 @@ const CameraView = ({ onClose, onLog, initialImage }: { onClose: () => void, onL
                     <button 
                       onClick={() => onLog({ 
                         id: Math.random().toString(36).substr(2, 9),
+                        profileId: activeProfileId,
                         food_name: analysis.food_name,
                         calories: analysis.calories,
                         protein: analysis.protein,
@@ -1108,7 +862,51 @@ const CameraView = ({ onClose, onLog, initialImage }: { onClose: () => void, onL
   );
 };
 
-const ProfileView = ({ profile, onChange, onClose, isAuthenticated, onSyncAuth, onLogout }: { profile: UserProfile, onChange: (p: UserProfile) => void, onClose: () => void, isAuthenticated: boolean, onSyncAuth: () => void, onLogout: () => void }) => {
+const ProfileView = ({ 
+  profile, 
+  profiles, 
+  activeProfileId, 
+  onSetActiveProfile, 
+  onUpdateProfiles, 
+  onChange, 
+  onClose 
+}: { 
+  profile: UserProfile, 
+  profiles: UserProfile[], 
+  activeProfileId: string, 
+  onSetActiveProfile: (id: string) => void, 
+  onUpdateProfiles: (ps: UserProfile[]) => void, 
+  onChange: (p: UserProfile) => void, 
+  onClose: () => void 
+}) => {
+  const [isAddingProfile, setIsAddingProfile] = useState(false);
+  const [newProfileName, setNewProfileName] = useState('');
+
+  const addNewProfile = () => {
+    if (!newProfileName.trim()) return;
+    const newId = Math.random().toString(36).substr(2, 9);
+    const colors = ['#ef4444', '#f97316', '#f59e0b', '#84cc16', '#10b981', '#06b6d4', '#6366f1', '#a855f7', '#ec4899'];
+    const newP: UserProfile = {
+      ...profile,
+      id: newId,
+      name: newProfileName,
+      avatarColor: colors[Math.floor(Math.random() * colors.length)]
+    };
+    onUpdateProfiles([...profiles, newP]);
+    onSetActiveProfile(newId);
+    setNewProfileName('');
+    setIsAddingProfile(false);
+  };
+
+  const removeProfile = (id: string) => {
+    if (profiles.length <= 1) return;
+    const updated = profiles.filter(p => p.id !== id);
+    onUpdateProfiles(updated);
+    if (activeProfileId === id) {
+      onSetActiveProfile(updated[0].id);
+    }
+  };
+
   return (
     <motion.div 
       initial={{ opacity: 0, x: 100 }}
@@ -1118,60 +916,152 @@ const ProfileView = ({ profile, onChange, onClose, isAuthenticated, onSyncAuth, 
     >
       <div className="max-w-xl mx-auto space-y-10">
         <header className="flex justify-between items-center">
-          <h2 className="text-3xl font-black tracking-tighter uppercase italic">Profile & Stats</h2>
+          <h2 className="text-3xl font-black tracking-tighter uppercase italic">User Profiles</h2>
           <button onClick={onClose} className="w-10 h-10 bg-zinc-100 rounded-full flex items-center justify-center">
             <X size={20} />
           </button>
         </header>
 
-        <section className="space-y-6">
+        <section className="space-y-4">
+          <div className="flex items-center justify-between px-2">
+            <h3 className="text-[10px] uppercase font-black tracking-widest text-zinc-400">Manage Profiles</h3>
+            <button 
+              onClick={() => setIsAddingProfile(true)}
+              className="text-[10px] uppercase font-black tracking-widest text-zinc-900 border-b-2 border-zinc-900"
+            >
+              Add New
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {profiles.map(p => (
+              <div 
+                key={p.id}
+                className={`p-4 rounded-3xl border-2 transition-all flex items-center justify-between group ${p.id === activeProfileId ? 'border-zinc-900 bg-zinc-900 text-white' : 'border-zinc-100 bg-white hover:border-zinc-300'}`}
+              >
+                <div 
+                  className="flex items-center gap-3 cursor-pointer flex-1"
+                  onClick={() => onSetActiveProfile(p.id)}
+                >
+                  <div 
+                    className="w-10 h-10 rounded-full flex items-center justify-center border-2 border-white/20"
+                    style={{ backgroundColor: p.avatarColor || '#18181b' }}
+                  >
+                    <User size={18} />
+                  </div>
+                  <div>
+                    <div className="text-xs font-black uppercase tracking-tight">{p.name || 'Set Name'}</div>
+                    <div className={`text-[10px] font-bold ${p.id === activeProfileId ? 'text-zinc-400' : 'text-zinc-400'}`}>
+                      {p.weight}kg · {p.height}cm
+                    </div>
+                  </div>
+                </div>
+                {profiles.length > 1 && (
+                  <button 
+                    onClick={() => removeProfile(p.id)}
+                    className={`opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-red-500 rounded-full ${p.id === activeProfileId ? 'text-white' : 'text-zinc-400 hover:text-white'}`}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {isAddingProfile && (
+            <motion.div 
+               initial={{ opacity: 0, scale: 0.95 }}
+               animate={{ opacity: 1, scale: 1 }}
+               className="p-6 bg-zinc-50 border-2 border-dashed border-zinc-200 rounded-3xl flex flex-col gap-3"
+            >
+              <input 
+                autoFocus
+                type="text" 
+                placeholder="Profile Name (e.g. Spouse, Friend)"
+                value={newProfileName}
+                onChange={(e) => setNewProfileName(e.target.value)}
+                className="bg-white p-4 rounded-2xl text-sm font-bold focus:outline-none border-2 border-transparent focus:border-zinc-900"
+              />
+              <div className="flex gap-2">
+                <button 
+                  onClick={() => setIsAddingProfile(false)}
+                  className="flex-1 py-3 bg-white border border-zinc-200 rounded-xl text-[10px] font-black uppercase tracking-widest"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={addNewProfile}
+                  className="flex-1 py-3 bg-zinc-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
+                >
+                  Create
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </section>
+
+        <section className="space-y-6 pt-6 border-t border-zinc-100">
+          <div className="px-2">
+            <h3 className="text-[10px] uppercase font-black tracking-widest text-zinc-400">Settings for {profile.name}</h3>
+          </div>
+          
           <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <label className="text-[10px] uppercase font-bold text-zinc-400 tracking-widest">Display Name</label>
+              <input 
+                type="text" 
+                value={profile.name} 
+                onChange={(e) => onChange({ ...profile, name: e.target.value })}
+                className="w-full bg-zinc-50 p-4 rounded-2xl text-lg font-bold border-transparent focus:border-zinc-900 focus:outline-none transition-all"
+              />
+            </div>
             <div className="space-y-1">
               <label className="text-[10px] uppercase font-bold text-zinc-400 tracking-widest">Weight (KG)</label>
               <input 
                 type="number" 
                 value={profile.weight} 
                 onChange={(e) => onChange({ ...profile, weight: parseFloat(e.target.value) || 0 })}
-                className="w-full bg-zinc-50 p-4 rounded-2xl text-xl font-bold border-transparent focus:border-zinc-900 focus:outline-none transition-all"
-              />
-            </div>
-            <div className="space-y-1">
-               <label className="text-[10px] uppercase font-bold text-zinc-400 tracking-widest">Height (CM)</label>
-               <input 
-                type="number" 
-                value={profile.height} 
-                onChange={(e) => onChange({ ...profile, height: parseFloat(e.target.value) || 0 })}
-                className="w-full bg-zinc-50 p-4 rounded-2xl text-xl font-bold border-transparent focus:border-zinc-900 focus:outline-none transition-all"
+                className="w-full bg-zinc-50 p-4 rounded-2xl text-lg font-bold border-transparent focus:border-zinc-900 focus:outline-none transition-all"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-1">
+               <label className="text-[10px] uppercase font-bold text-zinc-400 tracking-widest">Height (CM)</label>
+               <input 
+                type="number" 
+                value={profile.height} 
+                onChange={(e) => onChange({ ...profile, height: parseFloat(e.target.value) || 0 })}
+                className="w-full bg-zinc-50 p-4 rounded-2xl text-lg font-bold border-transparent focus:border-zinc-900 focus:outline-none transition-all"
+              />
+            </div>
+            <div className="space-y-1">
               <label className="text-[10px] uppercase font-bold text-zinc-400 tracking-widest">Age</label>
               <input 
                 type="number" 
                 value={profile.age} 
                 onChange={(e) => onChange({ ...profile, age: parseInt(e.target.value) || 0 })}
-                className="w-full bg-zinc-50 p-4 rounded-2xl text-xl font-bold border-transparent focus:border-zinc-900 focus:outline-none transition-all"
+                className="w-full bg-zinc-50 p-4 rounded-2xl text-lg font-bold border-transparent focus:border-zinc-900 focus:outline-none transition-all"
               />
             </div>
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase font-bold text-zinc-400 tracking-widest">Gender</label>
-              <div className="flex bg-zinc-50 p-1 rounded-2xl h-[60px]">
-                <button 
-                  onClick={() => onChange({ ...profile, gender: 'male' })}
-                  className={`flex-1 rounded-xl font-bold text-sm transition-all ${profile.gender === 'male' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-400'}`}
-                >
-                  Male
-                </button>
-                <button 
-                  onClick={() => onChange({ ...profile, gender: 'female' })}
-                  className={`flex-1 rounded-xl font-bold text-sm transition-all ${profile.gender === 'female' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-400'}`}
-                >
-                  Female
-                </button>
-              </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-bold text-zinc-400 tracking-widest">Gender</label>
+            <div className="flex bg-zinc-50 p-1 rounded-2xl h-[60px]">
+              <button 
+                onClick={() => onChange({ ...profile, gender: 'male' })}
+                className={`flex-1 rounded-xl font-bold text-sm transition-all ${profile.gender === 'male' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-400'}`}
+              >
+                Male
+              </button>
+              <button 
+                onClick={() => onChange({ ...profile, gender: 'female' })}
+                className={`flex-1 rounded-xl font-bold text-sm transition-all ${profile.gender === 'female' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-400'}`}
+              >
+                Female
+              </button>
             </div>
           </div>
 
@@ -1219,7 +1109,7 @@ const ProfileView = ({ profile, onChange, onClose, isAuthenticated, onSyncAuth, 
 
           <div className="space-y-4">
             <label className="text-[10px] uppercase font-bold text-zinc-400 tracking-widest">Activity Level</label>
-            <div className="space-y-2">
+            <div className="grid grid-cols-1 gap-2">
               {ACTIVITY_LEVELS.map(level => (
                 <button 
                   key={level.value}
@@ -1233,87 +1123,33 @@ const ProfileView = ({ profile, onChange, onClose, isAuthenticated, onSyncAuth, 
           </div>
         </section>
 
-        <section className="bg-zinc-50 p-6 rounded-3xl border border-zinc-100 flex items-center justify-between">
-           <div>
-              <div className="text-[10px] uppercase font-bold text-zinc-400 mb-1">Sheets Integration</div>
-              <div className="text-sm font-bold flex items-center gap-2">
-                {isAuthenticated ? (
-                  <div className="text-lime-600 flex items-center gap-1"><Cloud size={14} /> Connected</div>
-                ) : (
-                  <div className="text-zinc-400">Not Synced</div>
-                )}
-              </div>
-           </div>
-           {!isAuthenticated && (
-              <button 
-                onClick={async () => {
-                  const res = await fetch('/api/auth/url');
-                  const { url } = await res.json();
-                  window.open(url, 'oauth', 'width=600,height=700');
-                }}
-                className="bg-zinc-900 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest"
-              >
-                Connect
-              </button>
-           )}
-        </section>
-
         <section className="p-6 bg-lime-50 rounded-3xl border border-lime-100 space-y-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-lime-500 text-white rounded-2xl flex items-center justify-center">
               <Download size={20} />
             </div>
             <div>
-              <h4 className="text-sm font-black uppercase tracking-tight">Install as Mobile App</h4>
-              <p className="text-[10px] text-lime-700/60 font-medium leading-relaxed">No APK download needed. Optimized for mobile installation via your browser.</p>
+              <h4 className="text-sm font-black uppercase tracking-tight">PWA Installation</h4>
+              <p className="text-[10px] text-lime-700/60 font-medium leading-relaxed">Save to home screen for an app-like experience.</p>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3 pt-2">
             <div className="p-4 bg-white rounded-2xl border border-lime-100/50">
-              <div className="text-[9px] font-black uppercase text-lime-600 mb-2">Android (Chrome)</div>
-              <p className="text-[10px] text-zinc-500 font-medium leading-normal">Tap the "three dots" menu  ⋮ and select <span className="font-bold text-zinc-900">"Install app"</span> or <span className="font-bold text-zinc-900">"Add to Home Screen"</span>.</p>
+              <div className="text-[9px] font-black uppercase text-lime-600 mb-2">Android</div>
+              <p className="text-[10px] text-zinc-500 font-medium leading-normal">Menu ⋮ → Install app</p>
             </div>
             <div className="p-4 bg-white rounded-2xl border border-lime-100/50">
-              <div className="text-[9px] font-black uppercase text-lime-600 mb-2">iOS (Safari)</div>
-              <p className="text-[10px] text-zinc-500 font-medium leading-normal">Tap the <span className="font-bold text-zinc-900">Share icon</span> and select <span className="font-bold text-zinc-900">"Add to Home Screen"</span>.</p>
+              <div className="text-[9px] font-black uppercase text-lime-600 mb-2">iOS</div>
+              <p className="text-[10px] text-zinc-500 font-medium leading-normal">Share → Add to Home</p>
             </div>
-          </div>
-          <div className="text-[9px] text-lime-600 font-bold bg-lime-100/50 p-3 rounded-xl">
-             Note: Progressive Web Apps (PWA) provide an app-like experience without needing an APK store download.
           </div>
         </section>
 
         <button 
-          onClick={onLogout}
-          className="w-full flex items-center justify-center gap-2 p-4 rounded-2xl text-red-500 font-bold hover:bg-red-50 transition-colors"
-        >
-          <LogOut size={18} />
-          Sign Out
-        </button>
-
-        <button 
-          onClick={async () => {
-            if (isAuthenticated) {
-              await fetch('/api/profile', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                  age: profile.age, 
-                  weight: profile.weight, 
-                  height: profile.height,
-                  gender: profile.gender,
-                  activityLevel: profile.activityLevel,
-                  targetWeight: profile.targetWeight,
-                  targetDate: profile.targetDate,
-                  country: profile.country
-                })
-              });
-            }
-            onClose();
-          }}
+          onClick={onClose}
           className="w-full py-5 bg-zinc-900 text-white rounded-3xl text-xs font-black uppercase tracking-widest shadow-xl shadow-zinc-200"
         >
-          Save & Exit
+          Save & Done
         </button>
       </div>
     </motion.div>
@@ -1376,7 +1212,7 @@ const LogItem = ({
               className="cursor-pointer hover:bg-zinc-50 px-2 rounded-lg transition-colors text-right"
             >
               <div className="font-black text-lg">+{log.calories}</div>
-              <div className="text-[9px] uppercase font-bold text-zinc-300">{log.synced ? 'Synced' : 'Local'}</div>
+              <div className="text-[9px] uppercase font-bold text-zinc-300">Kcal</div>
             </div>
           )}
         </div>

@@ -1,4 +1,5 @@
 export interface UserProfile {
+  id: string;
   name: string;
   age: number;
   weight: number; // kg
@@ -8,10 +9,12 @@ export interface UserProfile {
   targetWeight?: number;
   targetDate?: string;
   country?: string;
+  avatarColor?: string;
 }
 
 export interface MealLog {
   id: string;
+  profileId: string;
   food_name: string;
   calories: number;
   protein?: number;
@@ -19,15 +22,14 @@ export interface MealLog {
   fat?: number;
   timestamp: string;
   image?: string;
-  synced?: boolean;
 }
 
 export interface WorkoutLog {
   id: string;
+  profileId: string;
   type: string;
   calories_burned: number;
   timestamp: string;
-  synced?: boolean;
 }
 
 export const ACTIVITY_LEVELS = [
