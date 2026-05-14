@@ -13,6 +13,7 @@ export interface MealLog {
   calories: number;
   timestamp: string;
   image?: string;
+  synced?: boolean;
 }
 
 export const ACTIVITY_LEVELS = [

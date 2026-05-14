@@ -5,8 +5,17 @@ import { google } from "googleapis";
 import session from "express-session";
 import cookieParser from "cookie-parser";
 import dotenv from "dotenv";
+import { drizzle } from "drizzle-orm/node-postgres";
+import pg from "pg";
+import * as schema from "./src/db/schema";
+import { eq } from "drizzle-orm";
 
 dotenv.config();
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+const db = drizzle(pool, { schema });
 
 const app = express();
 const PORT = 3000;
@@ -54,8 +63,33 @@ app.get('/auth/callback', async (req, res) => {
     const { tokens } = await oauth2Client.getToken(code as string);
     oauth2Client.setCredentials(tokens);
     
-    // Store tokens in session for now
+    // Get user info to associate with session
+    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+    const userInfo = await oauth2.userinfo.get();
+
+    // Upsert user
+    let user;
+    if (userInfo.data.id) {
+      const existingUser = await db.query.users.findFirst({
+        where: eq(schema.users.googleId, userInfo.data.id),
+      });
+
+      if (existingUser) {
+        user = existingUser;
+      } else {
+        const [newUser] = await db.insert(schema.users).values({
+          googleId: userInfo.data.id,
+          email: userInfo.data.email,
+          name: userInfo.data.name,
+          avatar: userInfo.data.picture,
+        }).returning();
+        user = newUser;
+      }
+    }
+
+    // Store tokens and user in session
     (req.session as any).tokens = tokens;
+    (req.session as any).userId = user?.id;
 
     res.send(`
       <html>
@@ -79,11 +113,213 @@ app.get('/auth/callback', async (req, res) => {
 });
 
 app.get('/api/auth/status', (req, res) => {
+  const userId = (req.session as any).userId;
   const tokens = (req.session as any).tokens;
-  res.json({ isAuthenticated: !!tokens });
+  res.json({ 
+    isAuthenticated: !!userId, 
+    hasSheetsAccess: !!tokens,
+    userId 
+  });
 });
 
-// Google Sheets Sync Endpoint
+app.post('/api/auth/google', async (req, res) => {
+  const { credential } = req.body;
+  try {
+    const ticket = await oauth2Client.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID
+    });
+    const payload = ticket.getPayload();
+    if (!payload || !payload.sub) return res.status(400).json({ error: "Invalid token" });
+
+    // Upsert user
+    let user = await db.query.users.findFirst({
+      where: eq(schema.users.googleId, payload.sub),
+    });
+
+    if (!user) {
+      const [newUser] = await db.insert(schema.users).values({
+        googleId: payload.sub,
+        email: payload.email,
+        name: payload.name,
+        avatar: payload.picture,
+      }).returning();
+      user = newUser;
+    } else {
+      // Update existing user (optional, e.g. update name/avatar)
+      await db.update(schema.users)
+        .set({ name: payload.name, avatar: payload.picture })
+        .where(eq(schema.users.id, user.id));
+    }
+
+    (req.session as any).userId = user.id;
+    res.json({ success: true, user });
+  } catch (error) {
+    console.error("GIS Verification Error:", error);
+    res.status(401).json({ error: "Unauthorized" });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) return res.status(500).json({ error: "Logout failed" });
+    res.clearCookie('connect.sid');
+    res.json({ success: true });
+  });
+});
+
+app.post('/api/logs/sync', async (req, res) => {
+  const userId = (req.session as any).userId;
+  if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+  const { logs } = req.body;
+  if (!Array.isArray(logs)) return res.status(400).json({ error: "Invalid data" });
+
+  try {
+    const tokens = (req.session as any).tokens;
+    let sheets: any = null;
+    let spreadsheetId = (req.session as any).spreadsheetId;
+
+    if (tokens) {
+      oauth2Client.setCredentials(tokens);
+      sheets = google.sheets({ version: 'v4', auth: oauth2Client });
+      const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+      if (!spreadsheetId) {
+        const response = await drive.files.list({
+          q: "name = 'CalorieLens Meals' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false",
+          fields: 'files(id, name)',
+        });
+        if (response.data.files && response.data.files.length > 0) {
+          spreadsheetId = response.data.files[0].id;
+        } else {
+          const spreadsheet = await sheets.spreadsheets.create({
+            requestBody: { properties: { title: 'CalorieLens Meals' } },
+          });
+          spreadsheetId = spreadsheet.data.spreadsheetId;
+          await sheets.spreadsheets.values.append({
+            spreadsheetId,
+            range: 'Sheet1!A1',
+            valueInputOption: 'RAW',
+            requestBody: { values: [['Date', 'Food Name', 'Calories']] },
+          });
+        }
+        (req.session as any).spreadsheetId = spreadsheetId;
+      }
+    }
+
+    const results = [];
+    for (const log of logs) {
+      // Save to DB
+      const [newLog] = await db.insert(schema.logs).values({
+        userId,
+        foodName: log.food_name,
+        calories: log.calories,
+        createdAt: new Date(log.timestamp),
+      }).returning();
+
+      // Sync to Sheets
+      if (sheets && spreadsheetId) {
+        await sheets.spreadsheets.values.append({
+          spreadsheetId,
+          range: 'Sheet1!A1',
+          valueInputOption: 'RAW',
+          requestBody: {
+            values: [[log.timestamp, log.food_name, log.calories]],
+          },
+        });
+      }
+      results.push({ localId: log.id, serverId: newLog.id });
+    }
+
+    res.json({ success: true, synced: results });
+  } catch (error: any) {
+    console.error("Batch Sync Error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Logs API
+app.get('/api/logs', async (req, res) => {
+  const userId = (req.session as any).userId;
+  if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+  try {
+    const userLogs = await db.query.logs.findMany({
+      where: eq(schema.logs.userId, userId),
+      orderBy: (logs, { desc }) => [desc(logs.createdAt)],
+    });
+    res.json(userLogs);
+  } catch (error) {
+    console.error("Fetch Logs Error:", error);
+    res.status(500).json({ error: "Failed to fetch logs" });
+  }
+});
+
+app.delete('/api/logs/:id', async (req, res) => {
+  const userId = (req.session as any).userId;
+  if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+  const { id } = req.params;
+  try {
+    // Basic protection: only delete if it belongs to the user
+    const logId = parseInt(id);
+    if (isNaN(logId)) return res.status(400).json({ error: "Invalid ID" });
+
+    const result = await db.delete(schema.logs)
+      .where(eq(schema.logs.id, logId))
+      .where(eq(schema.logs.userId, userId))
+      .returning();
+
+    if (result.length === 0) return res.status(404).json({ error: "Log not found or unauthorized" });
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Delete Log Error:", error);
+    res.status(500).json({ error: "Failed to delete log" });
+  }
+});
+
+app.put('/api/logs/:id', async (req, res) => {
+  const userId = (req.session as any).userId;
+  if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+  const { id } = req.params;
+  const { calories, foodName } = req.body;
+  try {
+    const logId = parseInt(id);
+    if (isNaN(logId)) return res.status(400).json({ error: "Invalid ID" });
+
+    const result = await db.update(schema.logs)
+      .set({ calories, foodName })
+      .where(eq(schema.logs.id, logId))
+      .where(eq(schema.logs.userId, userId))
+      .returning();
+
+    if (result.length === 0) return res.status(404).json({ error: "Log not found or unauthorized" });
+
+    res.json({ success: true, log: result[0] });
+  } catch (error) {
+    console.error("Update Log Error:", error);
+    res.status(500).json({ error: "Failed to update log" });
+  }
+});
+
+app.post('/api/profile', async (req, res) => {
+  const userId = (req.session as any).userId;
+  if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+  const { age, weight, height } = req.body;
+  try {
+    await db.update(schema.users)
+      .set({ age, weight, height })
+      .where(eq(schema.users.id, userId));
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Update Profile Error:", error);
+    res.status(500).json({ error: "Failed to update profile" });
+  }
+});
 app.post('/api/sync/sheets', async (req, res) => {
   const tokens = (req.session as any).tokens;
   if (!tokens) return res.status(401).json({ error: "Not authenticated" });
@@ -137,6 +373,17 @@ app.post('/api/sync/sheets', async (req, res) => {
         values: [[date || new Date().toISOString(), foodName, calories]],
       },
     });
+
+    // 3. Save to Local DB if user is logged in
+    const userId = (req.session as any).userId;
+    if (userId) {
+      await db.insert(schema.logs).values({
+        userId,
+        foodName,
+        calories,
+        createdAt: date ? new Date(date) : new Date(),
+      });
+    }
 
     res.json({ success: true, spreadsheetId });
   } catch (error: any) {

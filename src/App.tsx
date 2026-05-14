@@ -104,6 +104,8 @@ export default function App() {
 
   const [isSyncing, setIsSyncing] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [hasSheetsAccess, setHasSheetsAccess] = useState(false);
+  const googleBtnRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     localStorage.setItem('cl_profile', JSON.stringify(profile));
@@ -115,33 +117,165 @@ export default function App() {
 
   useEffect(() => {
     checkAuth();
+    initGoogleSignIn();
   }, []);
+
+  const initGoogleSignIn = () => {
+    const google = (window as any).google;
+    if (google) {
+      google.accounts.id.initialize({
+        client_id: (import.meta as any).env.VITE_GOOGLE_CLIENT_ID || '', // We'll need to use VITE_ prefix for client side
+        callback: handleGoogleResponse,
+      });
+      if (googleBtnRef.current) {
+        google.accounts.id.renderButton(googleBtnRef.current, {
+          theme: 'outline',
+          size: 'large',
+          shape: 'pill'
+        });
+      }
+    }
+  };
+
+  const handleGoogleResponse = async (response: any) => {
+    try {
+      const res = await fetch('/api/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential: response.credential })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setIsAuthenticated(true);
+        fetchData();
+      }
+    } catch (e) {
+      console.error("Login Error:", e);
+    }
+  };
 
   const checkAuth = async () => {
     try {
       const res = await fetch('/api/auth/status');
       const data = await res.json();
       setIsAuthenticated(data.isAuthenticated);
+      setHasSheetsAccess(data.hasSheetsAccess);
+      if (data.isAuthenticated) fetchData();
     } catch (e) {
       console.error(e);
     }
+  };
+
+  const fetchData = async () => {
+    try {
+      const logsRes = await fetch('/api/logs');
+      const logsData = await logsRes.json();
+      if (Array.isArray(logsData)) {
+        const cloudLogs = logsData.map((l: any) => ({
+          id: String(l.id),
+          food_name: l.foodName,
+          calories: l.calories,
+          timestamp: l.createdAt,
+          image: l.imageUrl,
+          synced: true
+        }));
+        
+        setLogs(prev => {
+          const unsynced = prev.filter(l => !l.synced);
+          return [...unsynced, ...cloudLogs];
+        });
+        
+        setTimeout(syncUnsyncedLogs, 1000);
+      }
+    } catch (e) {
+      console.error("Fetch Data Error:", e);
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      setIsAuthenticated(false);
+      setHasSheetsAccess(false);
+      setLogs([]);
+      setView('dashboard');
+      // Re-init Google Sign-In button if needed
+      setTimeout(initGoogleSignIn, 100);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const deleteLog = async (id: string) => {
+    // If it's a serial ID (string containing only digits), it might be from the server
+    const isServerId = /^\d+$/.test(id);
+    
+    if (isAuthenticated && isServerId) {
+      try {
+        await fetch(`/api/logs/${id}`, { method: 'DELETE' });
+      } catch (e) {
+        console.error("Delete Error:", e);
+      }
+    }
+    setLogs(prev => prev.filter(l => l.id !== id));
+  };
+
+  const updateLog = async (id: string, newCalories: number) => {
+    if (isNaN(newCalories)) return;
+    const isServerId = /^\d+$/.test(id);
+    
+    if (isAuthenticated && isServerId) {
+      try {
+        await fetch(`/api/logs/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ calories: newCalories })
+        });
+      } catch (e) {
+        console.error("Update Error:", e);
+      }
+    }
+    setLogs(prev => prev.map(l => l.id === id ? { ...l, calories: newCalories } : l));
   };
 
   const syncToSheets = async (log: MealLog) => {
     if (!isAuthenticated) return;
     setIsSyncing(true);
     try {
-      await fetch('/api/sync/sheets', {
+      const res = await fetch('/api/logs/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          foodName: log.food_name,
-          calories: log.calories,
-          date: log.timestamp
-        })
+        body: JSON.stringify({ logs: [log] })
       });
+      const data = await res.json();
+      if (data.success) {
+        setLogs(prev => prev.map(l => l.id === log.id ? { ...l, synced: true } : l));
+      }
     } catch (e) {
       console.error("Sync Error:", e);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const syncUnsyncedLogs = async () => {
+    const unsynced = logs.filter(l => !l.synced);
+    if (unsynced.length === 0 || !isAuthenticated) return;
+
+    setIsSyncing(true);
+    try {
+      const res = await fetch('/api/logs/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ logs: unsynced })
+      });
+      const data = await res.json();
+      if (data.success) {
+        const syncedIds = new Set(data.synced.map((s: any) => s.localId));
+        setLogs(prev => prev.map(l => syncedIds.has(l.id) ? { ...l, synced: true } : l));
+      }
+    } catch (e) {
+      console.error("Batch Sync Error:", e);
     } finally {
       setIsSyncing(false);
     }
@@ -174,7 +308,7 @@ export default function App() {
                 </div>
                 <div className="text-[10px] uppercase font-bold tracking-[0.2em] text-zinc-400 mb-6 flex items-center gap-2">
                     <div className="w-1.5 h-1.5 bg-lime-500 rounded-full"></div>
-                    Live Nutrition Tracker
+                    {isAuthenticated ? 'Cloud Sync Active' : 'Guest Mode (Local Storage)'}
                 </div>
                 <ProgressBar current={dailyCalories} total={calorieBudget} />
               </section>
@@ -191,11 +325,20 @@ export default function App() {
                 </button>
                 <button 
                   onClick={() => setView('history')}
-                  className="w-20 bg-zinc-100 p-6 rounded-3xl flex flex-col items-center justify-center gap-3 hover:bg-zinc-200 transition-colors"
+                  className="w-20 bg-zinc-100 p-6 rounded-3xl flex flex-col items-center justify-center gap-3 hover:bg-zinc-200 transition-colors group"
                 >
-                  <History size={24} />
+                  <History size={24} className="group-hover:rotate-12 transition-transform" />
                 </button>
               </div>
+
+              {/* Login Invitation for Guests */}
+              {!isAuthenticated && (
+                <div className="p-8 border-2 border-zinc-900 rounded-[2rem] flex flex-col items-center text-center gap-4">
+                  <div className="text-sm font-bold tracking-tight">Save your data to the cloud</div>
+                  <p className="text-[11px] text-zinc-400 leading-relaxed max-w-[200px]">Sign in to sync your meal logs with Google Sheets and access them anywhere.</p>
+                  <div ref={googleBtnRef}></div>
+                </div>
+              )}
 
               {/* Recent Logs */}
               <section>
@@ -206,32 +349,26 @@ export default function App() {
                   </button>
                 </div>
                 <div className="space-y-3">
-                  {logs.length === 0 ? (
-                    <div className="py-12 text-center text-zinc-400 italic text-sm">No meals logged yet. Time for a snack?</div>
+                  {logs.filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString()).length === 0 ? (
+                    <div className="py-12 text-center text-zinc-400 italic text-sm">No meals logged yet today. Time for a snack?</div>
                   ) : (
-                    logs.slice(0, 5).map(log => (
-                      <div key={log.id} className="flex items-center justify-between p-4 border border-zinc-100 rounded-2xl bg-white hover:border-zinc-300 transition-colors group">
-                        <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 bg-zinc-50 rounded-xl overflow-hidden flex items-center justify-center border border-zinc-100">
-                             {log.image ? <img src={log.image} className="w-full h-full object-cover" /> : <Zap size={16} className="text-zinc-300" />}
-                          </div>
-                          <div>
-                            <div className="font-bold tracking-tight">{log.food_name}</div>
-                            <div className="text-[10px] text-zinc-400 font-mono">{formatTime(log.timestamp)}</div>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <div className="font-black text-lg">+{log.calories}</div>
-                          <div className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Kcal</div>
-                        </div>
-                      </div>
+                    logs
+                      .filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString())
+                      .slice(0, 5)
+                      .map(log => (
+                        <LogItem 
+                          key={log.id} 
+                          log={log} 
+                          onDelete={deleteLog} 
+                          onEdit={updateLog} 
+                        />
                     ))
                   )}
                 </div>
               </section>
 
               {/* Sync Alert */}
-              {!isAuthenticated && (
+              {isAuthenticated && !hasSheetsAccess && (
                 <div className="bg-blue-50 border border-blue-100 p-6 rounded-3xl flex items-center justify-between">
                   <div>
                     <div className="text-sm font-bold text-blue-900">Sheets Sync Off</div>
@@ -242,7 +379,6 @@ export default function App() {
                       const res = await fetch('/api/auth/url');
                       const { url } = await res.json();
                       window.open(url, 'oauth', 'width=600,height=700');
-                      // In a real app we'd poll or use postMessage listeners
                     }}
                     className="bg-blue-600 text-white px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-blue-700 transition-colors"
                   >
@@ -258,8 +394,9 @@ export default function App() {
           <CameraView 
             onClose={() => setView('dashboard')} 
             onLog={(log) => {
-              setLogs([log, ...logs]);
-              syncToSheets(log);
+              const newLog = { ...log, synced: false };
+              setLogs([newLog, ...logs]);
+              syncToSheets(newLog);
               setView('dashboard');
             }} 
           />
@@ -272,6 +409,7 @@ export default function App() {
             onClose={() => setView('dashboard')} 
             onSyncAuth={checkAuth}
             isAuthenticated={isAuthenticated}
+            onLogout={logout}
           />
         )}
 
@@ -279,7 +417,8 @@ export default function App() {
           <HistoryView 
              logs={logs} 
              onClose={() => setView('dashboard')} 
-             onDelete={(id) => setLogs(logs.filter(l => l.id !== id))}
+             onDelete={deleteLog}
+             onEdit={updateLog}
           />
         )}
       </AnimatePresence>
@@ -453,7 +592,7 @@ const CameraView = ({ onClose, onLog }: { onClose: () => void, onLog: (l: MealLo
   );
 };
 
-const ProfileView = ({ profile, onChange, onClose, isAuthenticated, onSyncAuth }: { profile: UserProfile, onChange: (p: UserProfile) => void, onClose: () => void, isAuthenticated: boolean, onSyncAuth: () => void }) => {
+const ProfileView = ({ profile, onChange, onClose, isAuthenticated, onSyncAuth, onLogout }: { profile: UserProfile, onChange: (p: UserProfile) => void, onClose: () => void, isAuthenticated: boolean, onSyncAuth: () => void, onLogout: () => void }) => {
   return (
     <motion.div 
       initial={{ opacity: 0, x: 100 }}
@@ -540,10 +679,30 @@ const ProfileView = ({ profile, onChange, onClose, isAuthenticated, onSyncAuth }
                 Connect
               </button>
            )}
+          <button 
+            onClick={onLogout}
+            className="w-full flex items-center justify-center gap-2 p-4 rounded-2xl text-red-500 font-bold hover:bg-red-50 transition-colors"
+          >
+            <LogOut size={18} />
+            Sign Out
+          </button>
         </section>
 
         <button 
-          onClick={onClose}
+          onClick={async () => {
+            if (isAuthenticated) {
+              await fetch('/api/profile', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                  age: profile.age, 
+                  weight: profile.weight, 
+                  height: profile.height 
+                })
+              });
+            }
+            onClose();
+          }}
           className="w-full py-5 bg-zinc-900 text-white rounded-3xl text-xs font-black uppercase tracking-widest shadow-xl shadow-zinc-200"
         >
           Save & Exit
@@ -553,7 +712,86 @@ const ProfileView = ({ profile, onChange, onClose, isAuthenticated, onSyncAuth }
   );
 };
 
-const HistoryView = ({ logs, onClose, onDelete }: { logs: MealLog[], onClose: () => void, onDelete: (id: string) => void }) => {
+const LogItem = ({ 
+  log, 
+  onDelete, 
+  onEdit 
+}: { 
+  log: MealLog, 
+  onDelete: (id: string) => void, 
+  onEdit: (id: string, calories: number) => void 
+}) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editValue, setEditValue] = useState(log.calories.toString());
+
+  const handleEdit = () => {
+    const val = parseInt(editValue);
+    if (!isNaN(val)) {
+      onEdit(log.id, val);
+    } else {
+      setEditValue(log.calories.toString());
+    }
+    setIsEditing(false);
+  };
+
+  return (
+    <div className="flex items-center justify-between p-4 border border-zinc-100 rounded-2xl bg-white hover:border-zinc-300 transition-colors group">
+      <div className="flex items-center gap-4">
+        <div className="w-14 h-14 bg-zinc-50 rounded-2xl overflow-hidden flex items-center justify-center border border-zinc-50">
+          {log.image ? <img src={log.image} className="w-full h-full object-cover" /> : <Zap size={18} className="text-zinc-200" />}
+        </div>
+        <div>
+          <div className="font-bold tracking-tight">{log.food_name}</div>
+          <div className="text-[10px] text-zinc-400 font-mono italic">{formatTime(log.timestamp)}</div>
+        </div>
+      </div>
+      <div className="flex items-center gap-4">
+        <div className="text-right">
+          {isEditing ? (
+            <input 
+              autoFocus
+              type="number"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onBlur={handleEdit}
+              onKeyDown={(e) => e.key === 'Enter' && handleEdit()}
+              className="w-16 bg-zinc-100 border-none p-1 text-right font-black text-lg focus:outline-none rounded-lg"
+            />
+          ) : (
+            <div 
+              onClick={() => setIsEditing(true)}
+              className="cursor-pointer hover:bg-zinc-50 px-2 rounded-lg transition-colors text-right"
+            >
+              <div className="font-black text-lg">+{log.calories}</div>
+              <div className="text-[9px] uppercase font-bold text-zinc-300">{log.synced ? 'Synced' : 'Local'}</div>
+            </div>
+          )}
+        </div>
+        <button 
+          onClick={() => onDelete(log.id)}
+          className="w-8 h-8 flex items-center justify-center text-zinc-200 hover:text-red-500 hover:bg-red-50 rounded-full transition-all"
+        >
+          <X size={16} />
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const HistoryView = ({ logs, onClose, onDelete, onEdit }: { logs: MealLog[], onClose: () => void, onDelete: (id: string) => void, onEdit: (id: string, calories: number) => void }) => {
+  // Group logs by date
+  const groupedLogs = logs.reduce((groups: { [key: string]: { logs: MealLog[], total: number } }, log) => {
+    const date = new Date(log.timestamp).toLocaleDateString();
+    if (!groups[date]) {
+      groups[date] = { logs: [], total: 0 };
+    }
+    groups[date].logs.push(log);
+    groups[date].total += log.calories;
+    return groups;
+  }, {});
+
+  const sortedDates = Object.keys(groupedLogs).sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
+
   return (
     <motion.div 
       initial={{ opacity: 0, x: -100 }}
@@ -563,49 +801,39 @@ const HistoryView = ({ logs, onClose, onDelete }: { logs: MealLog[], onClose: ()
     >
       <div className="max-w-xl mx-auto space-y-10">
         <header className="flex justify-between items-center">
-          <h2 className="text-3xl font-black tracking-tighter uppercase italic">Meal History</h2>
+          <h2 className="text-3xl font-black tracking-tighter uppercase italic">Nutrition History</h2>
           <button onClick={onClose} className="w-10 h-10 bg-zinc-100 rounded-full flex items-center justify-center">
             <X size={20} />
           </button>
         </header>
 
-        <div className="space-y-4">
-          {logs.map((log, i) => {
-            const date = new Date(log.timestamp).toLocaleDateString();
-            const showDate = i === 0 || new Date(logs[i-1].timestamp).toLocaleDateString() !== date;
-            
-            return (
-              <div key={log.id} className="space-y-4">
-                {showDate && (
-                  <div className="flex items-center gap-4 py-4">
-                    <div className="h-px bg-zinc-100 flex-1"></div>
-                    <div className="text-[10px] uppercase font-black tracking-[0.3em] text-zinc-300">{date}</div>
-                    <div className="h-px bg-zinc-100 flex-1"></div>
-                  </div>
-                )}
-                <div className="flex items-center justify-between p-4 border border-zinc-100 rounded-2xl bg-white group hover:border-zinc-300 transition-colors">
-                  <div className="flex items-center gap-4">
-                    <div className="w-16 h-16 bg-zinc-50 rounded-2xl overflow-hidden flex items-center justify-center">
-                       {log.image ? <img src={log.image} className="w-full h-full object-cover" /> : <Zap size={20} className="text-zinc-200" />}
-                    </div>
-                    <div>
-                      <div className="font-bold text-lg tracking-tight">{log.food_name}</div>
-                      <div className="text-[10px] text-zinc-400 font-mono italic">{formatTime(log.timestamp)}</div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-6">
-                    <div className="text-right">
-                      <div className="font-black text-xl tracking-tighter">+{log.calories}</div>
-                      <div className="text-[10px] font-bold text-zinc-400 uppercase">Kcal</div>
-                    </div>
-                    <button onClick={() => onDelete(log.id)} className="text-zinc-200 hover:text-red-500 transition-colors p-2">
-                       <X size={18} />
-                    </button>
+        <div className="space-y-12">
+          {sortedDates.length === 0 ? (
+            <div className="text-center py-20 text-zinc-400 italic">No historical data found.</div>
+          ) : (
+            sortedDates.map((date) => (
+              <div key={date} className="space-y-4">
+                <div className="flex items-center justify-between border-b border-zinc-100 pb-2">
+                  <div className="text-sm font-black uppercase tracking-widest text-zinc-900">{date}</div>
+                  <div className="flex items-baseline gap-1">
+                    <span className="text-lg font-bold text-zinc-900">{groupedLogs[date].total}</span>
+                    <span className="text-[10px] uppercase font-bold text-zinc-400">Total Kcal</span>
                   </div>
                 </div>
+                
+                <div className="space-y-3">
+                  {groupedLogs[date].logs.map((log) => (
+                    <LogItem 
+                      key={log.id} 
+                      log={log} 
+                      onDelete={onDelete} 
+                      onEdit={onEdit} 
+                    />
+                  ))}
+                </div>
               </div>
-            );
-          })}
+            ))
+          )}
         </div>
       </div>
     </motion.div>
