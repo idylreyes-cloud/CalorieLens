@@ -1,0 +1,8 @@
+{
+  "name": "CalorieLens",
+  "description": "Intelligent food scanning and calorie tracking with Google Sheets synchronization.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": []
+}
