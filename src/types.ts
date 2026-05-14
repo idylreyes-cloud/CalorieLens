@@ -1,12 +1,12 @@
 export interface UserProfile {
   id: string;
   name: string;
-  age: number;
-  weight: number; // kg
-  height: number; // cm
+  age: number | string;
+  weight: number | string; // kg
+  height: number | string; // cm
   gender: 'male' | 'female';
   activityLevel: number; // 1.2 to 1.9
-  targetWeight?: number;
+  targetWeight?: number | string;
   targetDate?: string;
   country?: string;
   avatarColor?: string;

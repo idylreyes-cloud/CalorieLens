@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CalorieLens</string>
+    <string name="title_activity_main">CalorieLens</string>
+    <string name="package_name">com.calorielens.app</string>
+    <string name="custom_url_scheme">com.calorielens.app</string>
+</resources>

@@ -33,7 +33,10 @@ import { UserProfile, MealLog, WorkoutLog, ACTIVITY_LEVELS } from './types';
 // --- Utils ---
 const calculateBMR = (profile: UserProfile): number => {
   // Mifflin-St Jeor Equation
-  const { weight, height, age, gender, activityLevel } = profile;
+  const weight = typeof profile.weight === 'string' ? parseFloat(profile.weight) || 0 : profile.weight;
+  const height = typeof profile.height === 'string' ? parseFloat(profile.height) || 0 : profile.height;
+  const age = typeof profile.age === 'string' ? parseFloat(profile.age) || 0 : profile.age;
+  const { gender, activityLevel } = profile;
   let bmr = (10 * weight) + (6.25 * height) - (5 * age);
   if (gender === 'male') bmr += 5;
   else bmr -= 161;
@@ -48,11 +51,14 @@ const formatTime = (iso: string) => {
 
 const getCalorieGoalInfo = (profile: UserProfile): { dailyTarget: number, advice: string, isUnreachable: boolean, suggestions: { name: string, calories: number }[] } => {
   const tdee = calculateBMR(profile);
+  const currentWeight = typeof profile.weight === 'string' ? parseFloat(profile.weight) || 0 : profile.weight;
+  const targetWeight = typeof profile.targetWeight === 'string' ? parseFloat(profile.targetWeight) || 0 : (profile.targetWeight || 0);
+
   if (!profile.targetWeight || !profile.targetDate) {
     return { dailyTarget: tdee, advice: "Set a target weight to get a custom goal.", isUnreachable: false, suggestions: [] };
   }
 
-  const weightDiff = profile.weight - profile.targetWeight; // positive means lose weight
+  const weightDiff = currentWeight - targetWeight; // positive means lose weight
   const totalCaloriesDiff = weightDiff * 7700;
   
   const targetDate = new Date(profile.targetDate);
@@ -366,8 +372,11 @@ export default function App() {
     localStorage.setItem('cl_workouts', JSON.stringify(workouts));
   }, [workouts]);
 
+  const [deleteConfirmation, setDeleteConfirmation] = useState<{ id: string, type: 'meal' | 'workout', name?: string } | null>(null);
+
   const deleteLog = (id: string) => {
     setLogs(prev => prev.filter(l => l.id !== id));
+    setDeleteConfirmation(null);
   };
 
   const updateLog = (id: string, newCalories: number) => {
@@ -388,6 +397,7 @@ export default function App() {
 
   const removeWorkoutLog = (id: string) => {
     setWorkouts(prev => prev.filter(w => w.id !== id));
+    setDeleteConfirmation(null);
   };
 
   const activeLogs = logs.filter(l => l.profileId === activeProfileId);
@@ -479,6 +489,52 @@ export default function App() {
   return (
     <div className="min-h-screen bg-white text-zinc-900 font-sans selection:bg-lime-200">
       <BrowserWarning />
+      
+      <AnimatePresence>
+        {deleteConfirmation && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] bg-zinc-900/40 backdrop-blur-sm flex items-center justify-center p-6"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white rounded-[2.5rem] p-8 max-w-xs w-full shadow-2xl space-y-6"
+            >
+              <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center text-red-500 mx-auto">
+                <LogOut size={32} />
+              </div>
+              <div className="text-center space-y-2">
+                <h3 className="text-xl font-black uppercase tracking-tight italic">Confirm Delete</h3>
+                <p className="text-[10px] text-zinc-400 font-medium leading-relaxed">
+                  Are you sure you want to remove <span className="text-zinc-900 font-bold">{deleteConfirmation.name || 'this item'}</span>? This cannot be undone.
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => setDeleteConfirmation(null)}
+                  className="flex-1 py-4 bg-zinc-100 text-zinc-900 rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-transform"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={() => {
+                    if (deleteConfirmation.type === 'meal') deleteLog(deleteConfirmation.id);
+                    else removeWorkoutLog(deleteConfirmation.id);
+                  }}
+                  className="flex-1 py-4 bg-red-500 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-transform"
+                >
+                  Delete
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence mode="wait">
         {view === 'dashboard' && (
           <motion.div 
@@ -581,14 +637,15 @@ export default function App() {
                     <h3 className="text-[10px] font-black uppercase tracking-widest text-zinc-400">Survival Checklist</h3>
                     <div className="grid grid-cols-1 gap-2">
                        {goalInfo.suggestions.map((s, i) => {
-                         const isDone = activeWorkouts.some(w => 
+                         const workout = activeWorkouts.find(w => 
                            new Date(w.timestamp).toDateString() === new Date().toDateString() && 
                            w.type === s.name
                          );
+                         const isDone = !!workout;
                          return (
                            <button 
                              key={i}
-                             onClick={() => isDone ? removeWorkoutLog(activeWorkouts.find(w => w.type === s.name && new Date(w.timestamp).toDateString() === new Date().toDateString())!.id) : addWorkout(s.name, s.calories)}
+                             onClick={() => isDone ? setDeleteConfirmation({ id: workout!.id, type: 'workout', name: s.name }) : addWorkout(s.name, s.calories)}
                              className={`flex items-center justify-between p-4 rounded-2xl border transition-all ${isDone ? 'bg-lime-50 border-lime-200 text-lime-900' : 'bg-white border-zinc-100 text-zinc-600 hover:border-zinc-300'}`}
                            >
                              <div className="flex items-center gap-3 text-xs font-bold">
@@ -697,7 +754,7 @@ export default function App() {
                         <LogItem 
                           key={log.id} 
                           log={log} 
-                          onDelete={deleteLog} 
+                          onDelete={() => setDeleteConfirmation({ id: log.id, type: 'meal', name: log.food_name })} 
                           onEdit={updateLog} 
                         />
                     ))
@@ -737,7 +794,7 @@ export default function App() {
           <HistoryView 
              logs={activeLogs} 
              onClose={() => setView('dashboard')} 
-             onDelete={deleteLog}
+             setDeleteConfirmation={setDeleteConfirmation}
              onEdit={updateLog}
           />
         )}
@@ -1094,7 +1151,7 @@ const ProfileView = ({
               <input 
                 type="number" 
                 value={profile.weight} 
-                onChange={(e) => onChange({ ...profile, weight: parseFloat(e.target.value) || 0 })}
+                onChange={(e) => onChange({ ...profile, weight: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                 className="w-full bg-zinc-50 p-4 rounded-2xl text-lg font-bold border-transparent focus:border-zinc-900 focus:outline-none transition-all"
               />
             </div>
@@ -1106,7 +1163,7 @@ const ProfileView = ({
                <input 
                 type="number" 
                 value={profile.height} 
-                onChange={(e) => onChange({ ...profile, height: parseFloat(e.target.value) || 0 })}
+                onChange={(e) => onChange({ ...profile, height: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                 className="w-full bg-zinc-50 p-4 rounded-2xl text-lg font-bold border-transparent focus:border-zinc-900 focus:outline-none transition-all"
               />
             </div>
@@ -1115,7 +1172,7 @@ const ProfileView = ({
               <input 
                 type="number" 
                 value={profile.age} 
-                onChange={(e) => onChange({ ...profile, age: parseInt(e.target.value) || 0 })}
+                onChange={(e) => onChange({ ...profile, age: e.target.value === '' ? '' : parseInt(e.target.value) })}
                 className="w-full bg-zinc-50 p-4 rounded-2xl text-lg font-bold border-transparent focus:border-zinc-900 focus:outline-none transition-all"
               />
             </div>
@@ -1146,9 +1203,9 @@ const ProfileView = ({
                 <label className="text-[9px] uppercase font-bold text-zinc-500 tracking-widest">Target Weight (KG)</label>
                 <input 
                   type="number" 
-                  value={profile.targetWeight || ''} 
+                  value={profile.targetWeight ?? ''} 
                   placeholder="70"
-                  onChange={(e) => onChange({ ...profile, targetWeight: parseFloat(e.target.value) || undefined })}
+                  onChange={(e) => onChange({ ...profile, targetWeight: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                   className="w-full bg-white/10 p-4 rounded-2xl text-xl font-bold border-transparent focus:border-white focus:outline-none transition-all"
                 />
               </div>
@@ -1381,7 +1438,7 @@ const LogItem = ({
   );
 };
 
-const HistoryView = ({ logs, onClose, onDelete, onEdit }: { logs: MealLog[], onClose: () => void, onDelete: (id: string) => void, onEdit: (id: string, calories: number) => void }) => {
+const HistoryView = ({ logs, onClose, setDeleteConfirmation, onEdit }: { logs: MealLog[], onClose: () => void, setDeleteConfirmation: (val: { id: string, type: 'meal' | 'workout', name?: string } | null) => void, onEdit: (id: string, calories: number) => void }) => {
   // Group logs by date
   const groupedLogs = logs.reduce((groups: { [key: string]: { logs: MealLog[], total: number, protein: number, carbs: number, fat: number } }, log) => {
     const date = new Date(log.timestamp).toLocaleDateString();
@@ -1439,7 +1496,7 @@ const HistoryView = ({ logs, onClose, onDelete, onEdit }: { logs: MealLog[], onC
                     <LogItem 
                       key={log.id} 
                       log={log} 
-                      onDelete={onDelete} 
+                      onDelete={() => setDeleteConfirmation({ id: log.id, type: 'meal', name: log.food_name })} 
                       onEdit={onEdit} 
                     />
                   ))}
