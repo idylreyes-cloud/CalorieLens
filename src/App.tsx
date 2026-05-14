@@ -110,7 +110,13 @@ const getCalorieGoalInfo = (profile: UserProfile): { dailyTarget: number, advice
 };
 
 // --- AI ---
-const getAI = () => new GoogleGenAI({ apiKey: (process as any).env.GEMINI_API_KEY });
+const getAI = () => {
+  const apiKey = (process as any).env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is not defined. Please add it to your secrets.");
+  }
+  return new GoogleGenAI({ apiKey });
+};
 
 const getMealRecommendation = async (profile: UserProfile, targetMacros: { protein: number, carbs: number, fat: number, calories: number }, eaten: { protein: number, carbs: number, fat: number, calories: number }) => {
   try {
@@ -122,8 +128,8 @@ const getMealRecommendation = async (profile: UserProfile, targetMacros: { prote
     Provide the dish name and estimated macros for a typical portion.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: [{ parts: [{ text: prompt }] }],
+      model: "gemini-flash-latest",
+      contents: prompt,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -151,8 +157,8 @@ const analyzeTextMeal = async (text: string) => {
   try {
     const ai = getAI();
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: [{ parts: [{ text: `Identify nutritional info for: "${text}". Provide estimated calories, protein (g), carbs (g), and fat (g).` }] }],
+      model: "gemini-flash-latest",
+      contents: `Identify nutritional info for: "${text}". Provide estimated calories, protein (g), carbs (g), and fat (g).`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -242,6 +248,70 @@ const Header = ({ onProfile, currentProfile }: { onProfile: () => void, currentP
 export default function App() {
   const [view, setView] = useState<'dashboard' | 'camera' | 'profile' | 'history'>('dashboard');
   
+  const platform = (() => {
+    if (typeof navigator === 'undefined') return { isIOS: false, isAndroid: false, isSafari: false, isChrome: false, isInAppBrowser: false };
+    const ua = navigator.userAgent || navigator.vendor || (window as any).opera;
+    const isIOS = /iPhone|iPad|iPod/i.test(ua);
+    const isAndroid = /Android/i.test(ua);
+    const isSafari = /Safari/i.test(ua) && !/Chrome/i.test(ua);
+    const isChrome = /Chrome/i.test(ua);
+    
+    // Detect common in-app browsers that Google blocks for OAuth
+    const isInAppBrowser = (
+      /FBAN|FBAV/i.test(ua) || // Facebook
+      /Messenger/i.test(ua) || // Messenger
+      /Instagram/i.test(ua) || // Instagram
+      /Line/i.test(ua) ||      // Line
+      /Snapchat/i.test(ua) ||  // Snapchat
+      /LinkedInApp/i.test(ua) || // LinkedIn
+      (/iPhone|iPad|iPod/i.test(ua) && !/Safari/i.test(ua)) // Generic iOS webview
+    );
+
+    return { isIOS, isAndroid, isSafari, isChrome, isInAppBrowser };
+  })();
+
+  const BrowserWarning = () => {
+    if (!platform.isInAppBrowser) return null;
+    return (
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="fixed inset-0 z-[100] bg-zinc-900/95 backdrop-blur-md flex items-center justify-center p-6 text-white overflow-y-auto"
+      >
+        <div className="max-w-xs w-full space-y-6 text-center">
+          <div className="w-20 h-20 bg-lime-500 rounded-[2.5rem] flex items-center justify-center mx-auto shadow-2xl shadow-lime-500/20">
+            <Smartphone size={40} className="text-zinc-900" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-2xl font-black uppercase tracking-tight italic">Secure Browser Required</h2>
+            <p className="text-zinc-400 text-xs font-medium leading-relaxed">
+              Google blocks sign-ins from in-app browsers like Messenger or Instagram for your security.
+            </p>
+          </div>
+          <div className="p-4 bg-white/5 rounded-3xl border border-white/10 space-y-4">
+            <div className="flex items-start gap-3 text-left">
+              <div className="w-6 h-6 bg-lime-500 text-zinc-900 rounded-full flex items-center justify-center font-black text-[10px] shrink-0">1</div>
+              <p className="text-[11px] font-bold">Tap the three dots <span className="text-lime-400">•••</span> or Share button.</p>
+            </div>
+            <div className="flex items-start gap-3 text-left">
+              <div className="w-6 h-6 bg-lime-500 text-zinc-900 rounded-full flex items-center justify-center font-black text-[10px] shrink-0">2</div>
+              <p className="text-[11px] font-bold">Select <span className="text-lime-400">"Open in Safari"</span> or <span className="text-lime-400">"Open in Chrome"</span>.</p>
+            </div>
+          </div>
+          <button 
+            onClick={() => {
+              navigator.clipboard.writeText(window.location.href);
+              alert('Link copied! Please paste it into your browser (Safari/Chrome).');
+            }}
+            className="w-full py-4 bg-white text-zinc-900 rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-transform"
+          >
+            Copy Link
+          </button>
+        </div>
+      </motion.div>
+    );
+  };
+
   const [profiles, setProfiles] = useState<UserProfile[]>(() => {
     const saved = localStorage.getItem('cl_profiles');
     if (saved) return JSON.parse(saved);
@@ -408,6 +478,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-white text-zinc-900 font-sans selection:bg-lime-200">
+      <BrowserWarning />
       <AnimatePresence mode="wait">
         {view === 'dashboard' && (
           <motion.div 
@@ -654,6 +725,7 @@ export default function App() {
             profile={profile} 
             profiles={profiles}
             activeProfileId={activeProfileId}
+            platform={platform}
             onSetActiveProfile={setActiveProfileId}
             onUpdateProfiles={setProfiles}
             onChange={(p) => setProfiles(prev => prev.map(old => old.id === p.id ? p : old))} 
@@ -723,13 +795,13 @@ const CameraView = ({ onClose, onLog, initialImage, activeProfileId }: { onClose
     try {
       const ai = getAI();
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [{
+        model: "gemini-flash-latest",
+        contents: {
           parts: [
             { inlineData: { mimeType: "image/jpeg", data: base64.split(',')[1] } },
             { text: "Identify this food and provide estimated calories, protein (g), carbs (g), and fat (g)." }
           ]
-        }],
+        },
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -869,7 +941,8 @@ const ProfileView = ({
   onSetActiveProfile, 
   onUpdateProfiles, 
   onChange, 
-  onClose 
+  onClose,
+  platform
 }: { 
   profile: UserProfile, 
   profiles: UserProfile[], 
@@ -877,7 +950,8 @@ const ProfileView = ({
   onSetActiveProfile: (id: string) => void, 
   onUpdateProfiles: (ps: UserProfile[]) => void, 
   onChange: (p: UserProfile) => void, 
-  onClose: () => void 
+  onClose: () => void,
+  platform: any
 }) => {
   const [isAddingProfile, setIsAddingProfile] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
@@ -1123,6 +1197,51 @@ const ProfileView = ({
           </div>
         </section>
 
+        <section className="p-6 bg-zinc-900 text-white rounded-3xl space-y-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-white/20 rounded-2xl flex items-center justify-center">
+              <Users size={20} />
+            </div>
+            <div>
+              <h4 className="text-sm font-black uppercase tracking-tight">Share with others</h4>
+              <p className="text-[10px] text-zinc-400 font-medium leading-relaxed">Let others track their nutrition on their own devices.</p>
+            </div>
+          </div>
+          
+          <div className="space-y-3">
+            <button 
+              onClick={async () => {
+                const shareData = {
+                  title: 'CalorieLens',
+                  text: 'Check out this intelligent calorie tracker!',
+                  url: window.location.origin
+                };
+                try {
+                  if (navigator.share) {
+                    await navigator.share(shareData);
+                  } else {
+                    await navigator.clipboard.writeText(window.location.origin);
+                    alert('Link copied to clipboard!');
+                  }
+                } catch (err) {
+                  console.error(err);
+                }
+              }}
+              className="w-full py-4 bg-white text-zinc-900 rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center justify-center gap-2 active:scale-95 transition-transform"
+            >
+              <ArrowRight size={14} />
+              Share Link
+            </button>
+
+            <div className="p-4 bg-white/5 rounded-2xl border border-white/5 space-y-2">
+              <div className="text-[9px] font-black uppercase text-lime-400 tracking-widest">⚠️ Messenger / Instagram Tip</div>
+              <p className="text-[10px] text-zinc-400 leading-normal">
+                If your wife sees a "Cookie Error", ask her to tap the <span className="text-white">Share</span> or <span className="text-white">•••</span> icon in Messenger and select <span className="text-white">"Open in Safari"</span>.
+              </p>
+            </div>
+          </div>
+        </section>
+
         <section className="p-6 bg-lime-50 rounded-3xl border border-lime-100 space-y-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-lime-500 text-white rounded-2xl flex items-center justify-center">
@@ -1133,15 +1252,50 @@ const ProfileView = ({
               <p className="text-[10px] text-lime-700/60 font-medium leading-relaxed">Save to home screen for an app-like experience.</p>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-3 pt-2">
-            <div className="p-4 bg-white rounded-2xl border border-lime-100/50">
-              <div className="text-[9px] font-black uppercase text-lime-600 mb-2">Android</div>
-              <p className="text-[10px] text-zinc-500 font-medium leading-normal">Menu ⋮ → Install app</p>
+          
+          <div className="grid grid-cols-1 gap-3 pt-2">
+            {/* Detected Platform Tip */}
+            {platform.isIOS && (
+              <div className="p-4 bg-lime-500 text-white rounded-3xl shadow-lg shadow-lime-200/50 flex items-center gap-4">
+                <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center shrink-0">
+                  <ArrowRight className="rotate-90" />
+                </div>
+                <div>
+                  <div className="text-[10px] font-black uppercase tracking-widest opacity-80">Detected: iOS Safari</div>
+                  <div className="text-xs font-bold leading-tight">Tap Share (⎋) then "Add to Home Screen"</div>
+                </div>
+              </div>
+            )}
+
+            {platform.isAndroid && platform.isChrome && (
+              <div className="p-4 bg-lime-500 text-white rounded-3xl shadow-lg shadow-lime-200/50 flex items-center gap-4">
+                <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center shrink-0">
+                  <ArrowRight className="rotate-90" />
+                </div>
+                <div>
+                  <div className="text-[10px] font-black uppercase tracking-widest opacity-80">Detected: Android Chrome</div>
+                  <div className="text-xs font-bold leading-tight">Tap Menu (⋮) then "Install app"</div>
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className={`p-4 rounded-2xl border transition-all ${platform.isAndroid ? 'bg-white border-lime-500 ring-2 ring-lime-500/20' : 'bg-white/50 border-zinc-100'}`}>
+                <div className="text-[9px] font-black uppercase text-lime-600 mb-2">Android</div>
+                <p className="text-[10px] text-zinc-500 font-medium leading-normal">Menu ⋮ → Install app</p>
+              </div>
+              <div className={`p-4 rounded-2xl border transition-all ${platform.isIOS ? 'bg-white border-lime-500 ring-2 ring-lime-500/20' : 'bg-white/50 border-zinc-100'}`}>
+                <div className="text-[9px] font-black uppercase text-lime-600 mb-2">iOS</div>
+                <p className="text-[10px] text-zinc-500 font-medium leading-normal">Share → Add to Home</p>
+              </div>
             </div>
-            <div className="p-4 bg-white rounded-2xl border border-lime-100/50">
-              <div className="text-[9px] font-black uppercase text-lime-600 mb-2">iOS</div>
-              <p className="text-[10px] text-zinc-500 font-medium leading-normal">Share → Add to Home</p>
-            </div>
+            
+            {!platform.isAndroid && !platform.isIOS && platform.isChrome && (
+              <div className="p-4 bg-white rounded-2xl border border-zinc-100">
+                <div className="text-[9px] font-black uppercase text-zinc-400 mb-2">Desktop Chrome</div>
+                <p className="text-[10px] text-zinc-500 font-medium leading-normal">Click the <span className="font-bold">Install</span> icon in the address bar.</p>
+              </div>
+            )}
           </div>
         </section>
 
