@@ -23,7 +23,9 @@ import {
   Calendar,
   Cloud,
   Sparkles,
-  MapPin
+  MapPin,
+  Target,
+  Download
 } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 import { UserProfile, MealLog, WorkoutLog, ACTIVITY_LEVELS } from './types';
@@ -166,6 +168,34 @@ const getMealRecommendation = async (profile: UserProfile, targetMacros: { prote
   }
 };
 
+const analyzeTextMeal = async (text: string) => {
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: [{ parts: [{ text: `Identify nutritional info for: "${text}". Provide estimated calories, protein (g), carbs (g), and fat (g).` }] }],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            food_name: { type: Type.STRING },
+            calories: { type: Type.INTEGER },
+            protein: { type: Type.INTEGER },
+            carbs: { type: Type.INTEGER },
+            fat: { type: Type.INTEGER }
+          },
+          required: ["food_name", "calories", "protein", "carbs", "fat"]
+        }
+      }
+    });
+    return JSON.parse(response.text);
+  } catch (e) {
+    console.error("Text Meal Analysis Error:", e);
+    return null;
+  }
+};
+
 const ProgressBar = ({ current, total, advice, pcf }: { current: number, total: number, advice?: string, pcf: { protein: number, carbs: number, fat: number } }) => {
   const percentage = Math.min((current / total) * 100, 100);
   const isOverflow = current > total;
@@ -247,6 +277,8 @@ export default function App() {
   });
 
   const [initialImage, setInitialImage] = useState<string | null>(null);
+  const [mealTextInput, setMealTextInput] = useState('');
+  const [isAnalyzingText, setIsAnalyzingText] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -543,6 +575,11 @@ export default function App() {
 
   useEffect(() => {
     const fetchRec = async () => {
+      const dailyLogs = logs.filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString());
+      if (dailyLogs.length === 0 || !profile.targetWeight) {
+        setRecommendation(null);
+        return;
+      }
       setIsRefreshingRec(true);
       const rec = await getMealRecommendation(profile, { ...pcfBudget, calories: calorieBudget }, logs);
       setRecommendation(rec);
@@ -551,7 +588,7 @@ export default function App() {
     if (view === 'dashboard') {
       fetchRec();
     }
-  }, [view, calorieBudget, logs.length, profile.country]);
+  }, [view, calorieBudget, logs.length, profile.country, isAuthenticated]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -562,6 +599,31 @@ export default function App() {
         setView('camera');
       };
       reader.readAsDataURL(file);
+    }
+  };
+
+  const handleTextSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mealTextInput.trim() || isAnalyzingText) return;
+
+    setIsAnalyzingText(true);
+    const result = await analyzeTextMeal(mealTextInput);
+    setIsAnalyzingText(false);
+
+    if (result) {
+      const newLog: MealLog = {
+        id: Math.random().toString(36).substr(2, 9),
+        food_name: result.food_name,
+        calories: result.calories,
+        protein: result.protein,
+        carbs: result.carbs,
+        fat: result.fat,
+        timestamp: new Date().toISOString(),
+        synced: false
+      };
+      setLogs([newLog, ...logs]);
+      syncToSheets(newLog);
+      setMealTextInput('');
     }
   };
 
@@ -590,7 +652,21 @@ export default function App() {
                 </div>
                 <ProgressBar current={dailyCalories} total={calorieBudget} advice={goalInfo.advice} pcf={pcfBudget} />
                 
-                {recommendation && (
+                {/* Recommendation Section */}
+                {!profile.targetWeight ? (
+                  <div className="mt-8 p-6 bg-zinc-50 border border-zinc-100 rounded-3xl text-center">
+                    <Target size={24} className="mx-auto mb-3 text-zinc-300" />
+                    <h4 className="text-[10px] font-black uppercase tracking-widest text-zinc-900 mb-1">Set a Body Goal</h4>
+                    <p className="text-[10px] text-zinc-500 font-medium px-4 leading-relaxed">We need a target weight to calculate the perfect macro split for your recommendations.</p>
+                    <button onClick={() => setView('profile')} className="mt-4 text-[10px] font-black uppercase tracking-widest text-zinc-600 hover:text-zinc-900">Set Target Weight</button>
+                  </div>
+                ) : logs.filter(log => new Date(log.timestamp).toDateString() === new Date().toDateString()).length === 0 ? (
+                  <div className="mt-8 p-6 bg-zinc-50 border border-zinc-100 rounded-3xl text-center">
+                    <History size={24} className="mx-auto mb-3 text-zinc-300" />
+                    <h4 className="text-[10px] font-black uppercase tracking-widest text-zinc-900 mb-1">No Data for Today</h4>
+                    <p className="text-[10px] text-zinc-500 font-medium px-4 leading-relaxed">Log your first meal or snack. AI needs at least one entry to begin balancing your macros.</p>
+                  </div>
+                ) : recommendation ? (
                   <motion.div 
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -636,7 +712,12 @@ export default function App() {
                       </button>
                     </div>
                   </motion.div>
-                )}
+                ) : isRefreshingRec ? (
+                  <div className="mt-8 p-12 bg-zinc-50 border border-zinc-100 rounded-3xl text-center">
+                     <Sparkles size={24} className="mx-auto mb-3 text-lime-500 animate-pulse" />
+                     <div className="text-[10px] uppercase font-bold text-zinc-400 animate-pulse tracking-widest font-black">Scanning Body...</div>
+                  </div>
+                ) : null}
 
                 {goalInfo.suggestions.length > 0 && (
                   <div className="mt-8 space-y-4">
@@ -677,6 +758,35 @@ export default function App() {
                     </div>
                   </div>
                 )}
+              </section>
+
+              {/* Quick Log Bar */}
+              <section className="relative">
+                <form onSubmit={handleTextSubmit} className="relative group">
+                  <input 
+                    type="text"
+                    value={mealTextInput}
+                    onChange={(e) => setMealTextInput(e.target.value)}
+                    placeholder="Describe your meal (e.g. McDonald's Cheeseburger)"
+                    disabled={isAnalyzingText}
+                    className="w-full bg-zinc-50 border border-zinc-100 p-6 rounded-3xl text-sm font-medium focus:outline-none focus:border-zinc-300 transition-all shadow-sm pl-6 pr-16"
+                  />
+                  <button 
+                    disabled={!mealTextInput.trim() || isAnalyzingText}
+                    type="submit"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 bg-zinc-900 text-white rounded-2xl flex items-center justify-center hover:scale-105 active:scale-95 transition-all disabled:opacity-30 disabled:scale-100"
+                  >
+                    {isAnalyzingText ? (
+                      <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin"></div>
+                    ) : (
+                      <ArrowRight size={18} />
+                    )}
+                  </button>
+                </form>
+                <div className="text-[9px] uppercase font-bold text-zinc-300 tracking-widest mt-2 px-6 flex justify-between">
+                  <span>Quick Add</span>
+                  <span className="text-zinc-200">AI Powered Analysis</span>
+                </div>
               </section>
 
               {/* Quick Actions */}
@@ -1146,14 +1256,40 @@ const ProfileView = ({ profile, onChange, onClose, isAuthenticated, onSyncAuth, 
                 Connect
               </button>
            )}
-          <button 
-            onClick={onLogout}
-            className="w-full flex items-center justify-center gap-2 p-4 rounded-2xl text-red-500 font-bold hover:bg-red-50 transition-colors"
-          >
-            <LogOut size={18} />
-            Sign Out
-          </button>
         </section>
+
+        <section className="p-6 bg-lime-50 rounded-3xl border border-lime-100 space-y-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-lime-500 text-white rounded-2xl flex items-center justify-center">
+              <Download size={20} />
+            </div>
+            <div>
+              <h4 className="text-sm font-black uppercase tracking-tight">Install as Mobile App</h4>
+              <p className="text-[10px] text-lime-700/60 font-medium leading-relaxed">No APK download needed. Optimized for mobile installation via your browser.</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 pt-2">
+            <div className="p-4 bg-white rounded-2xl border border-lime-100/50">
+              <div className="text-[9px] font-black uppercase text-lime-600 mb-2">Android (Chrome)</div>
+              <p className="text-[10px] text-zinc-500 font-medium leading-normal">Tap the "three dots" menu  ⋮ and select <span className="font-bold text-zinc-900">"Install app"</span> or <span className="font-bold text-zinc-900">"Add to Home Screen"</span>.</p>
+            </div>
+            <div className="p-4 bg-white rounded-2xl border border-lime-100/50">
+              <div className="text-[9px] font-black uppercase text-lime-600 mb-2">iOS (Safari)</div>
+              <p className="text-[10px] text-zinc-500 font-medium leading-normal">Tap the <span className="font-bold text-zinc-900">Share icon</span> and select <span className="font-bold text-zinc-900">"Add to Home Screen"</span>.</p>
+            </div>
+          </div>
+          <div className="text-[9px] text-lime-600 font-bold bg-lime-100/50 p-3 rounded-xl">
+             Note: Progressive Web Apps (PWA) provide an app-like experience without needing an APK store download.
+          </div>
+        </section>
+
+        <button 
+          onClick={onLogout}
+          className="w-full flex items-center justify-center gap-2 p-4 rounded-2xl text-red-500 font-bold hover:bg-red-50 transition-colors"
+        >
+          <LogOut size={18} />
+          Sign Out
+        </button>
 
         <button 
           onClick={async () => {
